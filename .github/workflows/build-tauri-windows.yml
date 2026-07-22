@@ -1,0 +1,68 @@
+name: Build Krypton OOR Tauri for Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Install application dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Validate website parity and offline photo OCR
+        working-directory: desktop
+        run: |
+          npm run build:ui
+          npm run validate
+
+      - name: Build Windows x64 application and offline installer
+        working-directory: desktop
+        run: npm run tauri:build -- --target x86_64-pc-windows-msvc
+
+      - name: Create clean downloadable package
+        shell: pwsh
+        run: |
+          $package = "release/Krypton-OOR-Tauri-v54-Windows11-x64"
+          New-Item -ItemType Directory -Force "$package/Portable" | Out-Null
+          New-Item -ItemType Directory -Force "$package/Installer" | Out-Null
+          Copy-Item "desktop/src-tauri/target/x86_64-pc-windows-msvc/release/KryptonOOR.exe" "$package/Portable/KryptonOOR.exe"
+          Copy-Item "desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe" "$package/Installer/"
+          Copy-Item "desktop/README-TAURI.txt" "$package/README-FIRST.txt"
+          Get-FileHash "$package/Portable/KryptonOOR.exe" -Algorithm SHA256 | Format-List | Out-File "$package/SHA256.txt"
+          Compress-Archive -Path "$package/*" -DestinationPath "release/Krypton-OOR-Tauri-v54-Windows11-x64.zip" -CompressionLevel Optimal
+
+      - name: Upload verified Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Krypton-OOR-Tauri-v54-Windows11-x64
+          path: release/Krypton-OOR-Tauri-v54-Windows11-x64.zip
+          if-no-files-found: error
+          retention-days: 30
