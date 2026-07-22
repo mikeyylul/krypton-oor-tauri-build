@@ -19,5 +19,8 @@ PHOTO SCANNING
 - OCR worker, engine, and English recognition data are included inside the application.
 - New-job screenshots, RFQ photos, old job bookings, and shortage-list images scan without downloading recognition files.
 
+BUILD
+- This Windows x64 package is compiled and validated by the repository's Windows build workflow.
+
 WINDOWS NOTICE
 This application is not code-signed. Windows may display an Unknown Publisher warning. Select More info, then Run anyway only if you downloaded this package directly from its trusted source.
