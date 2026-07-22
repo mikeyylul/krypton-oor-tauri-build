@@ -1,0 +1,20 @@
+[package]
+name = "krypton-oor"
+version = "54.0.0"
+description = "Offline Krypton Solutions OOR project workflow application"
+authors = ["Krypton Solutions"]
+edition = "2021"
+
+[[bin]]
+name = "KryptonOOR"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
