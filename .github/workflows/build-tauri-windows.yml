@@ -45,6 +45,12 @@ jobs:
           npm run build:ui
           npm run validate
 
+      - name: Prepare Windows application icon
+        shell: pwsh
+        run: |
+          $encoded = Get-Content "desktop/src-tauri/icons/icon.ico.b64" -Raw
+          [IO.File]::WriteAllBytes("desktop/src-tauri/icons/icon.ico", [Convert]::FromBase64String($encoded.Trim()))
+
       - name: Build Windows x64 application and offline installer
         working-directory: desktop
         run: npm run tauri:build -- --target x86_64-pc-windows-msvc

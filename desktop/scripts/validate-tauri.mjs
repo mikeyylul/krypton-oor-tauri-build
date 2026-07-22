@@ -4,14 +4,15 @@ import { fileURLToPath } from "node:url";
 
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const siteRoot = path.resolve(desktopRoot, "..");
-const appSource = fs.readFileSync(path.join(siteRoot, "app/page.tsx"), "utf8");
-const desktopSource = fs.readFileSync(path.join(desktopRoot, "src/App.tsx"), "utf8");
+const readText = (filePath) =>
+  fs.readFileSync(filePath, "utf8").replace(/\r\n/g, "\n");
+const appSource = readText(path.join(siteRoot, "app/page.tsx"));
+const desktopSource = readText(path.join(desktopRoot, "src/App.tsx"));
 const config = JSON.parse(
   fs.readFileSync(path.join(desktopRoot, "src-tauri/tauri.conf.json"), "utf8"),
 );
-const rustSource = fs.readFileSync(
+const rustSource = readText(
   path.join(desktopRoot, "src-tauri/src/main.rs"),
-  "utf8",
 );
 
 const normalizedDesktop = desktopSource
