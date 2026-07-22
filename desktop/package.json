@@ -1,0 +1,29 @@
+{
+  "name": "krypton-solutions-oor-offline-ui",
+  "private": true,
+  "version": "54.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --config vite.config.mjs --host 127.0.0.1 --port 1420",
+    "prepare:ocr": "node scripts/prepare-ocr-assets.mjs",
+    "build": "npm run prepare:ocr && vite build --config vite.config.mjs",
+    "build:ui": "npm run prepare:ocr && vite build --config vite.config.mjs",
+    "validate": "node scripts/validate-offline.mjs && node scripts/validate-tauri.mjs",
+    "tauri": "tauri",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "@tesseract.js-data/eng": "1.0.0",
+    "lucide-react": "^0.468.0",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "tesseract.js": "^6.0.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4",
+    "@tailwindcss/postcss": "4.2.1",
+    "@vitejs/plugin-react": "6.0.2",
+    "vite": "8.0.13"
+  }
+}
