@@ -1368,7 +1368,7 @@ const navItems: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "quotes", label: "Quotes", icon: FileText },
   { id: "actions", label: "List of Action Items", icon: AlertTriangle },
   { id: "follow-ups", label: "Follow Up List", icon: StickyNote },
-  { id: "integrations", label: "Data & Backup", icon: FileSpreadsheet },
+  { id: "integrations", label: "Excel & Outlook", icon: FileSpreadsheet },
 ];
 
 export default function Home() {
@@ -1774,10 +1774,6 @@ export default function Home() {
             `${item.quantityPerAssembly} × ${item.inputLevel} ${item.pn}${item.rev ? ` Rev ${item.rev}` : ""}`,
         )
         .join("; "),
-      "Project Notes": (job.notes ?? [])
-        .map((note) => `${note.date || "No date"}: ${note.text}`)
-        .join("\n"),
-      "Project Notes Data": JSON.stringify(job.notes ?? []),
     }));
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(
@@ -1800,7 +1796,7 @@ export default function Home() {
         "Record ID": "Krypton Solutions OOR",
         Payload: JSON.stringify({
           format: "krypton-solutions-oor-backup",
-          version: 2,
+          version: 1,
           exportedAt: new Date().toISOString(),
         }),
       },
@@ -1808,11 +1804,6 @@ export default function Home() {
         "Record Type": "Job",
         "Record ID": job.id,
         Payload: JSON.stringify(job),
-      })),
-      ...jobs.map((job) => ({
-        "Record Type": "Job Notes",
-        "Record ID": job.id,
-        Payload: JSON.stringify(job.notes ?? []),
       })),
       ...quotes.map((quote) => ({
         "Record Type": "Quote",
@@ -1838,14 +1829,13 @@ export default function Home() {
       ["Krypton Solutions OOR Complete Backup"],
       ["Exported", new Date().toLocaleString()],
       ["Jobs", jobs.length],
-      ["Project Notes", jobs.reduce((count, job) => count + (job.notes?.length ?? 0), 0)],
       ["Quotes", quotes.length],
       ["Assembly Configurations", assemblyRecipes.length],
       ["Weekly Action Archives", weeklyActions.archives.length],
       [],
       [
         "Important",
-        "Use Data & Backup > Import Complete Backup to restore this file. Do not edit the Complete Backup sheet.",
+        "Use Excel & Outlook > Import Complete Backup to restore this file. Do not edit the Complete Backup sheet.",
       ],
     ]);
     summarySheet["!cols"] = [{ wch: 28 }, { wch: 100 }];
@@ -1870,7 +1860,6 @@ export default function Home() {
       });
       const parsed = rows.map((row) => ({
         type: String(row["Record Type"] ?? ""),
-        id: String(row["Record ID"] ?? ""),
         payload: String(row.Payload ?? ""),
       }));
       const infoRow = parsed.find((row) => row.type === "Backup Info");
@@ -1878,23 +1867,9 @@ export default function Home() {
       if (info?.format !== "krypton-solutions-oor-backup") {
         throw new Error("Invalid backup format");
       }
-      const importedNotes = new Map(
-        parsed
-          .filter((row) => row.type === "Job Notes")
-          .map((row) => [row.id, row.payload]),
-      );
       const importedJobs = parsed
         .filter((row) => row.type === "Job")
-        .map((row) => {
-          const job = normalizeJob(JSON.parse(row.payload) as Job);
-          const notesPayload = importedNotes.get(job.id);
-          if (!notesPayload) return job;
-          const notes = JSON.parse(notesPayload);
-          return {
-            ...job,
-            notes: Array.isArray(notes) ? notes : job.notes,
-          };
-        });
+        .map((row) => normalizeJob(JSON.parse(row.payload) as Job));
       const importedQuotes = parsed
         .filter((row) => row.type === "Quote")
         .map((row) => normalizeQuote(JSON.parse(row.payload) as QuoteRecord));
@@ -2045,7 +2020,7 @@ export default function Home() {
             onClick={() => setActiveView("integrations")}
           >
             <span className="connection-label">
-              <FileSpreadsheet size={16} /> Data + Backup
+              <FileSpreadsheet size={16} /> Excel + Outlook
             </span>
             <small>Imports, exports, and reminder setup</small>
           </button>
@@ -2126,7 +2101,7 @@ export default function Home() {
             quotes={quotes}
             onNew={() => setShowNewRfq(true)}
             onOpen={openQuoteWindow}
-            onUpdate={updateQuote}
+            onComplete={(id, completed) => updateQuote(id, { completed })}
           />
         )}
         {activeView === "configurations" && (
@@ -2453,7 +2428,7 @@ function DivisionView({
         await navigator.clipboard.writeText(plain);
       }
       notify(
-        `${division} Production Agenda copied. Paste it directly into your email.`,
+        `${division} Production Agenda copied to the clipboard.`,
       );
     } catch {
       notify("Copy was blocked by the browser. Please try again.");
@@ -2602,12 +2577,12 @@ function QuotesView({
   quotes,
   onNew,
   onOpen,
-  onUpdate,
+  onComplete,
 }: {
   quotes: QuoteRecord[];
   onNew: () => void;
   onOpen: (id: string) => void;
-  onUpdate: (id: string, change: Partial<QuoteRecord>) => void;
+  onComplete: (id: string, completed: boolean) => void;
 }) {
   function customerGroups(division: Division) {
     return Object.entries(
@@ -2628,10 +2603,8 @@ function QuotesView({
   }
 
   const urgentQuotes = [...quotes]
-    .filter(
-      (quote) =>
-        !quote.completed && quoteUrgency(quote.dueDate) !== "scheduled",
-    )
+    .filter((quote) => !quote.completed)
+    .filter((quote) => quoteUrgency(quote.dueDate) !== "scheduled")
     .sort(
       (a, b) =>
         a.dueDate.localeCompare(b.dueDate) ||
@@ -2711,6 +2684,7 @@ function QuotesView({
                       </div>
                       <div className="quote-table">
                         <div className="quote-table-head">
+                          <span>Complete</span>
                           <span>Contact</span>
                           <span>Tags</span>
                           <span>PN#</span>
@@ -2718,15 +2692,36 @@ function QuotesView({
                           <span>QTY</span>
                           <span>KSID</span>
                           <span>Due Date</span>
-                          <span>Complete</span>
+                          <span />
                         </div>
                         {customerQuotes.map((quote) => (
-                          <button
+                          <div
                             className="quote-table-row"
                             key={quote.id}
                             onClick={() => onOpen(quote.id)}
-                            aria-label={`Open ${quote.customer} RFQ for PN ${quote.pn}`}
+                            role="button"
+                            tabIndex={0}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                onOpen(quote.id);
+                              }
+                            }}
+                            aria-label={`Open ${quote.customer} RFQ for PN ${quote.pn}${quote.completed ? ", completed" : ""}`}
                           >
+                            <span
+                              className="quote-complete-cell"
+                              onClick={(event) => event.stopPropagation()}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={quote.completed}
+                                onChange={(event) =>
+                                  onComplete(quote.id, event.target.checked)
+                                }
+                                aria-label={`Mark RFQ for PN ${quote.pn} ${quote.completed ? "incomplete" : "complete"}`}
+                              />
+                            </span>
                             <span>{quote.contact}</span>
                             <span className="quote-row-tags">
                               {quote.tags.length ? (
@@ -2755,23 +2750,8 @@ function QuotesView({
                                 </em>
                               )}
                             </span>
-                            <span
-                              className="rfq-completion-control"
-                              onClick={(event) => event.stopPropagation()}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={quote.completed}
-                                onChange={(event) =>
-                                  onUpdate(quote.id, {
-                                    completed: event.target.checked,
-                                  })
-                                }
-                                aria-label={`Mark RFQ for ${quote.pn} complete`}
-                              />
-                              {quote.completed ? "Completed" : "Complete"}
-                            </span>
-                          </button>
+                            <ChevronRight size={17} />
+                          </div>
                         ))}
                       </div>
                     </section>
@@ -3117,22 +3097,19 @@ function QuoteDetailWindow({
             <p>Created {dateLabel(quote.createdAt.slice(0, 10))}</p>
           </div>
           <div className="quote-detail-header-actions">
-            <label className="rfq-completion-control">
-              <input
-                type="checkbox"
-                checked={quote.completed}
-                onChange={(event) =>
-                  onUpdate({ completed: event.target.checked })
-                }
-              />
-              {quote.completed ? "Completed" : "Mark complete"}
-            </label>
             <button
               className={`button small ${editingDetails ? "primary" : "secondary"}`}
               onClick={() => setEditingDetails((current) => !current)}
             >
               <Settings2 size={15} />
               {editingDetails ? "Done editing" : "Edit quote details"}
+            </button>
+            <button
+              className={`button small ${quote.completed ? "primary" : "secondary"}`}
+              onClick={() => onUpdate({ completed: !quote.completed })}
+            >
+              <CheckCircle2 size={15} />
+              {quote.completed ? "Completed" : "Mark complete"}
             </button>
             <button className="icon-button" aria-label="Close quote" onClick={onClose}>
               <X />
@@ -3436,11 +3413,12 @@ function ActionItemsView({
     "all" | "past-due" | "due-today" | "due-tomorrow"
   >("all");
   const filteredItems = items.filter((item) => {
+    if (dueFilter === "all") return true;
+    if (!item.dueDate) return false;
     const days = daysUntil(item.dueDate);
     if (dueFilter === "past-due") return days < 0;
     if (dueFilter === "due-today") return days === 0;
-    if (dueFilter === "due-tomorrow") return days === 1;
-    return true;
+    return days === 1;
   });
   const groupedByJob = filteredItems.reduce<Record<string, ActionItem[]>>((groups, item) => {
     (groups[item.jobId] ??= []).push(item);
@@ -3457,10 +3435,10 @@ function ActionItemsView({
           </p>
         </div>
         <span className="action-total">
-          <AlertTriangle size={18} /> {filteredItems.length} outstanding
+          <AlertTriangle size={18} /> {filteredItems.length} shown
         </span>
       </div>
-      <div className="action-filter-bar" role="group" aria-label="Filter action items">
+      <div className="action-filter-bar" role="group" aria-label="Filter action items by due date">
         {([
           ["all", "All"],
           ["past-due", "Past Due"],
@@ -3552,7 +3530,7 @@ function ActionItemsView({
               </div>
             ) : (
               <div className="clear-state">
-                <CheckCircle2 size={20} /> No overdue or next-day actions.
+                <CheckCircle2 size={20} /> No action items match this filter.
               </div>
             )}
           </section>
@@ -4088,7 +4066,7 @@ function ShortageEditor({
       } else {
         await navigator.clipboard.writeText(plain);
       }
-      notify("Customer shortage table copied. Paste it directly into your email.");
+      notify("Customer shortage table copied to the clipboard.");
     } catch {
       notify("Copy was blocked by the browser. Select the table and copy it manually.");
     }
@@ -4496,7 +4474,7 @@ function WeeklyNotepad({
         </div>
       </div>
       <footer>
-        Previous weeks move to <strong>Data &amp; Backup → Weekly Actions</strong>.
+        Previous weeks move to <strong>Excel &amp; Outlook → Weekly Actions</strong>.
       </footer>
     </aside>
   );
@@ -4519,7 +4497,7 @@ function IntegrationsView({
     <section className="view-stack">
       <div className="view-intro">
         <div>
-          <h2>Data and Backup</h2>
+          <h2>Excel and Outlook</h2>
           <p>
             Move job data and shortage lists between Krypton Solutions OOR and
             Microsoft Office.
@@ -5458,29 +5436,6 @@ function wordsFromTsv(tsv: string) {
     .filter((word): word is OcrWord => Boolean(word));
 }
 
-function parseBookingQuantityFromTsv(tsv: string) {
-  const words = wordsFromTsv(tsv);
-  const quantityLabel = words.find((word) => {
-    const normalized = normalizeHeading(word.text);
-    return normalized === "quantity" || /^q[a-z]?y$/.test(normalized);
-  });
-  if (!quantityLabel) return "";
-  const labelCenter = quantityLabel.top + quantityLabel.height / 2;
-  return (
-    words
-      .filter((word) => {
-        const center = word.top + word.height / 2;
-        return (
-          word.left > quantityLabel.left + quantityLabel.width + 4 &&
-          Math.abs(center - labelCenter) <= Math.max(12, quantityLabel.height)
-        );
-      })
-      .sort((a, b) => a.left - b.left)
-      .map((word) => cleanImportedCell(word.text).match(/^\d+$/)?.[0] ?? "")
-      .find(Boolean) ?? ""
-  );
-}
-
 function parseLegacyRowsFromTsv(tsv: string) {
   const words = wordsFromTsv(tsv);
   const ksidHeader = words.find(
@@ -5901,89 +5856,52 @@ async function recognizeScreenshotData(
     user_defined_dpi: "300",
   });
 
-  let images: Array<File | HTMLCanvasElement> = [file];
+  let image: File | HTMLCanvasElement = file;
   if (typeof createImageBitmap === "function") {
     try {
       const bitmap = await createImageBitmap(file);
-      const scale = Math.max(
-        2,
-        Math.min(
-          3,
-          Math.ceil(3200 / Math.max(bitmap.width, bitmap.height)),
-        ),
-      );
-      const grayscaleCanvas = document.createElement("canvas");
-      grayscaleCanvas.width = Math.round(bitmap.width * scale);
-      grayscaleCanvas.height = Math.round(bitmap.height * scale);
-      const grayscaleContext = grayscaleCanvas.getContext("2d");
-      if (grayscaleContext) {
-        grayscaleContext.imageSmoothingEnabled = true;
-        grayscaleContext.imageSmoothingQuality = "high";
-        grayscaleContext.drawImage(
-          bitmap,
+      const scale = Math.max(2, Math.min(4, 1800 / bitmap.width));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(bitmap.width * scale);
+      canvas.height = Math.round(bitmap.height * scale);
+      const context = canvas.getContext("2d");
+      if (context) {
+        context.imageSmoothingEnabled = true;
+        context.imageSmoothingQuality = "high";
+        context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        const imageData = context.getImageData(
           0,
           0,
-          grayscaleCanvas.width,
-          grayscaleCanvas.height,
+          canvas.width,
+          canvas.height,
         );
-        const grayscaleData = grayscaleContext.getImageData(
-          0,
-          0,
-          grayscaleCanvas.width,
-          grayscaleCanvas.height,
-        );
-        for (let index = 0; index < grayscaleData.data.length; index += 4) {
-          const grayscale = Math.round(
-            grayscaleData.data[index] * 0.2126 +
-              grayscaleData.data[index + 1] * 0.7152 +
-              grayscaleData.data[index + 2] * 0.0722,
+        for (let index = 0; index < imageData.data.length; index += 4) {
+          const lightestChannel = Math.max(
+            imageData.data[index],
+            imageData.data[index + 1],
+            imageData.data[index + 2],
           );
-          grayscaleData.data[index] = grayscale;
-          grayscaleData.data[index + 1] = grayscale;
-          grayscaleData.data[index + 2] = grayscale;
+          const highContrast = lightestChannel >= 170 ? 255 : 0;
+          imageData.data[index] = highContrast;
+          imageData.data[index + 1] = highContrast;
+          imageData.data[index + 2] = highContrast;
         }
-        grayscaleContext.putImageData(grayscaleData, 0, 0);
-
-        const contrastCanvas = document.createElement("canvas");
-        contrastCanvas.width = grayscaleCanvas.width;
-        contrastCanvas.height = grayscaleCanvas.height;
-        const contrastContext = contrastCanvas.getContext("2d");
-        if (contrastContext) {
-          const contrastData = new ImageData(
-            new Uint8ClampedArray(grayscaleData.data),
-            grayscaleData.width,
-            grayscaleData.height,
-          );
-          for (let index = 0; index < contrastData.data.length; index += 4) {
-            const highContrast = contrastData.data[index] >= 170 ? 255 : 0;
-            contrastData.data[index] = highContrast;
-            contrastData.data[index + 1] = highContrast;
-            contrastData.data[index + 2] = highContrast;
-          }
-          contrastContext.putImageData(contrastData, 0, 0);
-          images = [grayscaleCanvas, contrastCanvas];
-        } else {
-          images = [grayscaleCanvas];
-        }
+        context.putImageData(imageData, 0, 0);
+        image = canvas;
       }
       bitmap.close();
     } catch {
-      images = [file];
+      image = file;
     }
   }
 
   try {
-    const results = [];
-    for (const image of images) {
-      results.push(
-        await worker.recognize(image, {}, { text: true, tsv: true }),
-      );
-    }
-    const primaryTableResult = results.at(-1)!;
-    return {
-      text: results.map((result) => result.data.text).join("\n"),
-      tsv: primaryTableResult.data.tsv ?? "",
-    };
+    const result = await worker.recognize(
+      image,
+      {},
+      { text: true, tsv: true },
+    );
+    return { text: result.data.text, tsv: result.data.tsv ?? "" };
   } finally {
     await worker.terminate();
   }
@@ -6395,7 +6313,7 @@ function OldDataImportModal({
       <section className="modal-card legacy-import-modal" role="dialog" aria-modal="true">
         <div className="modal-header">
           <div>
-            <p className="section-kicker">Data & Backup · Special booking</p>
+            <p className="section-kicker">Excel & Outlook · Special booking</p>
             <h2>OLD DATA Production Booking</h2>
             <p>
               Import every row, review missing information, and confirm each job
@@ -6685,6 +6603,17 @@ function NewJobModal({
   const [mechanicalLevel, setMechanicalLevel] = useState<"CCA" | "LRU">("CCA");
   const [mechanicalRecipeId, setMechanicalRecipeId] = useState("");
   const [linkedJobIds, setLinkedJobIds] = useState<string[]>([]);
+  const customerFolders = useMemo(() => {
+    const folders = new Map<string, string>();
+    jobs.forEach((job) => {
+      const folder = job.customer.trim();
+      const key = folder.toLocaleLowerCase();
+      if (folder && !folders.has(key)) folders.set(key, folder);
+    });
+    return [...folders.values()].sort((left, right) =>
+      left.localeCompare(right, undefined, { sensitivity: "base" }),
+    );
+  }, [jobs]);
 
   const eligibleLinkedJobs = jobs.filter(
     (job) =>
@@ -6727,13 +6656,20 @@ function NewJobModal({
       otherProcess?: boolean;
     },
   ) {
+    const importedFields = {
+      ...parsed,
+      status: parsed.status || "Waiting on Parts",
+      createdDate: parsed.createdDate || chicagoDateKey(),
+    };
     const required = [...requiredDraftFields];
     if (parsed.polymerics) required.push("polymericsTurnDays");
     if (parsed.externalTesting) required.push("externalTestingTurnDays");
     if (parsed.otherProcess)
       required.push("otherSpecialProcess", "otherSpecialProcessTurnDays");
     setMissingFields(
-      new Set(required.filter((key) => !String(parsed[key] ?? "").trim())),
+      new Set(
+        required.filter((key) => !String(importedFields[key] ?? "").trim()),
+      ),
     );
     setDivisionMissing(!parsed.division);
     if (parsed.division) setDivision(parsed.division);
@@ -6747,7 +6683,7 @@ function NewJobModal({
         ({
           ...current,
           ...Object.fromEntries(
-            Object.entries(parsed).filter(
+            Object.entries(importedFields).filter(
               ([key]) =>
                 ![
                   "division",
@@ -6845,7 +6781,6 @@ function NewJobModal({
           quantity:
             extractOcrValue(text, ["QTY", "Quantity"]) ||
             labeled.quantity ||
-            parseBookingQuantityFromTsv(result.tsv) ||
             tableRow.quantity,
           projectType:
             projectTypes.find(
@@ -7478,9 +7413,19 @@ function NewJobModal({
           <label className={`wide ${fieldClass("customer")}`}>
             Customer Sub-Category / Folder {missingMark("customer")}
             <input
+              list="new-project-customer-folders"
               value={fields.customer}
               onChange={(event) => setField("customer", event.target.value)}
+              placeholder="Search an existing folder or enter a new customer"
             />
+            <datalist id="new-project-customer-folders">
+              {customerFolders.map((folder) => (
+                <option key={folder} value={folder} />
+              ))}
+            </datalist>
+            <small>
+              Select an existing customer folder or type a new name to create one.
+            </small>
           </label>
           <label className={fieldClass("jobNumber")}>
             {mechanicalBuild ? "MECH JOB #" : "Job #"} {missingMark("jobNumber")}
