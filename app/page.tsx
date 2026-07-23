@@ -1773,6 +1773,10 @@ export default function Home() {
             `${item.quantityPerAssembly} × ${item.inputLevel} ${item.pn}${item.rev ? ` Rev ${item.rev}` : ""}`,
         )
         .join("; "),
+      "Project Notes": (job.notes ?? [])
+        .map((note) => `${note.date || "No date"}: ${note.text}`)
+        .join("\n"),
+      "Project Notes Data": JSON.stringify(job.notes ?? []),
     }));
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(
@@ -1795,7 +1799,7 @@ export default function Home() {
         "Record ID": "Krypton Solutions OOR",
         Payload: JSON.stringify({
           format: "krypton-solutions-oor-backup",
-          version: 1,
+          version: 2,
           exportedAt: new Date().toISOString(),
         }),
       },
@@ -1803,6 +1807,11 @@ export default function Home() {
         "Record Type": "Job",
         "Record ID": job.id,
         Payload: JSON.stringify(job),
+      })),
+      ...jobs.map((job) => ({
+        "Record Type": "Job Notes",
+        "Record ID": job.id,
+        Payload: JSON.stringify(job.notes ?? []),
       })),
       ...quotes.map((quote) => ({
         "Record Type": "Quote",
@@ -1828,6 +1837,7 @@ export default function Home() {
       ["Krypton Solutions OOR Complete Backup"],
       ["Exported", new Date().toLocaleString()],
       ["Jobs", jobs.length],
+      ["Project Notes", jobs.reduce((count, job) => count + (job.notes?.length ?? 0), 0)],
       ["Quotes", quotes.length],
       ["Assembly Configurations", assemblyRecipes.length],
       ["Weekly Action Archives", weeklyActions.archives.length],
@@ -1859,6 +1869,7 @@ export default function Home() {
       });
       const parsed = rows.map((row) => ({
         type: String(row["Record Type"] ?? ""),
+        id: String(row["Record ID"] ?? ""),
         payload: String(row.Payload ?? ""),
       }));
       const infoRow = parsed.find((row) => row.type === "Backup Info");
@@ -1866,9 +1877,23 @@ export default function Home() {
       if (info?.format !== "krypton-solutions-oor-backup") {
         throw new Error("Invalid backup format");
       }
+      const importedNotes = new Map(
+        parsed
+          .filter((row) => row.type === "Job Notes")
+          .map((row) => [row.id, row.payload]),
+      );
       const importedJobs = parsed
         .filter((row) => row.type === "Job")
-        .map((row) => normalizeJob(JSON.parse(row.payload) as Job));
+        .map((row) => {
+          const job = normalizeJob(JSON.parse(row.payload) as Job);
+          const notesPayload = importedNotes.get(job.id);
+          if (!notesPayload) return job;
+          const notes = JSON.parse(notesPayload);
+          return {
+            ...job,
+            notes: Array.isArray(notes) ? notes : job.notes,
+          };
+        });
       const importedQuotes = parsed
         .filter((row) => row.type === "Quote")
         .map((row) => normalizeQuote(JSON.parse(row.payload) as QuoteRecord));
