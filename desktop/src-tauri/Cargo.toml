@@ -1,6 +1,6 @@
 [package]
 name = "krypton-oor"
-version = "55.0.0"
+version = "56.0.0"
 description = "Offline Krypton Solutions OOR project workflow application"
 authors = ["Krypton Solutions"]
 edition = "2021"
