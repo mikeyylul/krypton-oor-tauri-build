@@ -19,7 +19,6 @@ import {
   Gauge,
   LayoutDashboard,
   Image as ImageIcon,
-  Mail,
   Menu,
   PackageCheck,
   Plus,
@@ -122,6 +121,7 @@ type QuoteRecord = {
   ksid: string;
   dueDate: string;
   createdAt: string;
+  completed: boolean;
   notes: DailyNote[];
 };
 type PartialDelivery = {
@@ -1067,6 +1067,7 @@ function normalizeQuote(quote: QuoteRecord): QuoteRecord {
     ...quote,
     quantity: quote.quantity ?? "",
     tags: Array.isArray(quote.tags) ? quote.tags : [],
+    completed: quote.completed ?? false,
     notes: Array.isArray(quote.notes) ? quote.notes : [],
   };
 }
@@ -1368,7 +1369,7 @@ const navItems: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "quotes", label: "Quotes", icon: FileText },
   { id: "actions", label: "List of Action Items", icon: AlertTriangle },
   { id: "follow-ups", label: "Follow Up List", icon: StickyNote },
-  { id: "integrations", label: "Excel & Outlook", icon: FileSpreadsheet },
+  { id: "integrations", label: "Data & Backup", icon: FileSpreadsheet },
 ];
 
 export default function Home() {
@@ -1845,7 +1846,7 @@ export default function Home() {
       [],
       [
         "Important",
-        "Use Excel & Outlook > Import Complete Backup to restore this file. Do not edit the Complete Backup sheet.",
+        "Use Data & Backup > Import Complete Backup to restore this file. Do not edit the Complete Backup sheet.",
       ],
     ]);
     summarySheet["!cols"] = [{ wch: 28 }, { wch: 100 }];
@@ -2045,7 +2046,7 @@ export default function Home() {
             onClick={() => setActiveView("integrations")}
           >
             <span className="connection-label">
-              <FileSpreadsheet size={16} /> Excel + Outlook
+              <FileSpreadsheet size={16} /> Data + Backup
             </span>
             <small>Imports, exports, and reminder setup</small>
           </button>
@@ -2126,6 +2127,7 @@ export default function Home() {
             quotes={quotes}
             onNew={() => setShowNewRfq(true)}
             onOpen={openQuoteWindow}
+            onUpdate={updateQuote}
           />
         )}
         {activeView === "configurations" && (
@@ -2601,10 +2603,12 @@ function QuotesView({
   quotes,
   onNew,
   onOpen,
+  onUpdate,
 }: {
   quotes: QuoteRecord[];
   onNew: () => void;
   onOpen: (id: string) => void;
+  onUpdate: (id: string, change: Partial<QuoteRecord>) => void;
 }) {
   function customerGroups(division: Division) {
     return Object.entries(
@@ -2625,7 +2629,10 @@ function QuotesView({
   }
 
   const urgentQuotes = [...quotes]
-    .filter((quote) => quoteUrgency(quote.dueDate) !== "scheduled")
+    .filter(
+      (quote) =>
+        !quote.completed && quoteUrgency(quote.dueDate) !== "scheduled",
+    )
     .sort(
       (a, b) =>
         a.dueDate.localeCompare(b.dueDate) ||
@@ -2712,7 +2719,7 @@ function QuotesView({
                           <span>QTY</span>
                           <span>KSID</span>
                           <span>Due Date</span>
-                          <span />
+                          <span>Complete</span>
                         </div>
                         {customerQuotes.map((quote) => (
                           <button
@@ -2749,7 +2756,22 @@ function QuotesView({
                                 </em>
                               )}
                             </span>
-                            <ChevronRight size={17} />
+                            <span
+                              className="rfq-completion-control"
+                              onClick={(event) => event.stopPropagation()}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={quote.completed}
+                                onChange={(event) =>
+                                  onUpdate(quote.id, {
+                                    completed: event.target.checked,
+                                  })
+                                }
+                                aria-label={`Mark RFQ for ${quote.pn} complete`}
+                              />
+                              {quote.completed ? "Completed" : "Complete"}
+                            </span>
                           </button>
                         ))}
                       </div>
@@ -2893,6 +2915,7 @@ function NewRfqModal({
       ksid: fields.ksid.trim(),
       dueDate: fields.dueDate,
       createdAt: now,
+      completed: false,
       notes: initialNote
         ? [
             {
@@ -3095,6 +3118,16 @@ function QuoteDetailWindow({
             <p>Created {dateLabel(quote.createdAt.slice(0, 10))}</p>
           </div>
           <div className="quote-detail-header-actions">
+            <label className="rfq-completion-control">
+              <input
+                type="checkbox"
+                checked={quote.completed}
+                onChange={(event) =>
+                  onUpdate({ completed: event.target.checked })
+                }
+              />
+              {quote.completed ? "Completed" : "Mark complete"}
+            </label>
             <button
               className={`button small ${editingDetails ? "primary" : "secondary"}`}
               onClick={() => setEditingDetails((current) => !current)}
@@ -3317,15 +3350,6 @@ function QuoteDetailWindow({
   );
 }
 
-function emailActionReminder(item: ActionItem) {
-  const subject = `Krypton Solutions OOR reminder: Job #${item.jobNumber} — ${item.outstanding}`;
-  const body = `Division: ${item.division}\nCustomer: ${item.customer}\nJob #: ${item.jobNumber}\nKSID: ${item.ksid}\nOutstanding: ${item.outstanding}\nDue date: ${dateLabel(item.dueDate)}`;
-  window.open(
-    `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`,
-    "_self",
-  );
-}
-
 function DockAlertChart({
   alerts,
   onOpen,
@@ -3384,13 +3408,6 @@ function DockAlertChart({
               <div className="row-actions">
                 <button
                   className="icon-button"
-                  aria-label="Email reminder"
-                  onClick={() => emailActionReminder(alert)}
-                >
-                  <Mail size={15} />
-                </button>
-                <button
-                  className="icon-button"
                   aria-label="Open job workflow"
                   onClick={() => onOpen(alert.jobId)}
                 >
@@ -3416,7 +3433,17 @@ function ActionItemsView({
   items: ActionItem[];
   onOpen: (id: string) => void;
 }) {
-  const groupedByJob = items.reduce<Record<string, ActionItem[]>>((groups, item) => {
+  const [dueFilter, setDueFilter] = useState<
+    "all" | "past-due" | "due-today" | "due-tomorrow"
+  >("all");
+  const filteredItems = items.filter((item) => {
+    const days = daysUntil(item.dueDate);
+    if (dueFilter === "past-due") return days < 0;
+    if (dueFilter === "due-today") return days === 0;
+    if (dueFilter === "due-tomorrow") return days === 1;
+    return true;
+  });
+  const groupedByJob = filteredItems.reduce<Record<string, ActionItem[]>>((groups, item) => {
     (groups[item.jobId] ??= []).push(item);
     return groups;
   }, {});
@@ -3431,11 +3458,27 @@ function ActionItemsView({
           </p>
         </div>
         <span className="action-total">
-          <AlertTriangle size={18} /> {items.length} outstanding
+          <AlertTriangle size={18} /> {filteredItems.length} outstanding
         </span>
       </div>
+      <div className="action-filter-bar" role="group" aria-label="Filter action items">
+        {([
+          ["all", "All"],
+          ["past-due", "Past Due"],
+          ["due-tomorrow", "1 Day Until Due"],
+          ["due-today", "Due Today"],
+        ] as const).map(([value, label]) => (
+          <button
+            key={value}
+            className={`button small ${dueFilter === value ? "primary" : "secondary"}`}
+            onClick={() => setDueFilter(value)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
       {(["Commercial", "Aerospace"] as Division[]).map((division) => {
-        const divisionItems = items.filter(
+        const divisionItems = filteredItems.filter(
           (item) => item.division === division,
         );
         const divisionGroups = Object.values(groupedByJob).filter(
@@ -3487,13 +3530,6 @@ function ActionItemsView({
                       {dateLabel(nextDue.dueDate)}<small>{dueCopy(nextDue.dueDate)}</small>
                     </span>
                     <div className="row-actions" onClick={(event) => event.stopPropagation()}>
-                      <button
-                        className="icon-button"
-                        aria-label="Email action reminder"
-                        onClick={() => emailActionReminder(nextDue)}
-                      >
-                        <Mail size={15} />
-                      </button>
                       <button
                         className="icon-button"
                         aria-label="Open job workflow"
@@ -4461,7 +4497,7 @@ function WeeklyNotepad({
         </div>
       </div>
       <footer>
-        Previous weeks move to <strong>Excel &amp; Outlook → Weekly Actions</strong>.
+        Previous weeks move to <strong>Data &amp; Backup → Weekly Actions</strong>.
       </footer>
     </aside>
   );
@@ -4484,7 +4520,7 @@ function IntegrationsView({
     <section className="view-stack">
       <div className="view-intro">
         <div>
-          <h2>Excel and Outlook</h2>
+          <h2>Data and Backup</h2>
           <p>
             Move job data and shortage lists between Krypton Solutions OOR and
             Microsoft Office.
@@ -4623,29 +4659,6 @@ function IntegrationsView({
               values are highlighted in red for manual entry.
             </p>
           </div>
-        </article>
-        <article className="panel integration-card">
-          <span className="integration-icon outlook">
-            <Mail />
-          </span>
-          <div>
-            <small>Milestone alerts</small>
-            <h3>Outlook reminders</h3>
-            <p>
-              Open a prepared reminder email from the List of Action Items.
-              Automatic scheduled sends use a daily Power Automate flow.
-            </p>
-          </div>
-          <button
-            className="button secondary full"
-            onClick={() =>
-              window.alert(
-                "Power Automate is not opened from the offline application. Export your data here, then open Power Automate separately when you choose to use an internet-connected workflow.",
-              )
-            }
-          >
-            Offline application
-          </button>
         </article>
       </div>
       <div className="privacy-note">
@@ -6383,7 +6396,7 @@ function OldDataImportModal({
       <section className="modal-card legacy-import-modal" role="dialog" aria-modal="true">
         <div className="modal-header">
           <div>
-            <p className="section-kicker">Excel & Outlook · Special booking</p>
+            <p className="section-kicker">Data & Backup · Special booking</p>
             <h2>OLD DATA Production Booking</h2>
             <p>
               Import every row, review missing information, and confirm each job
