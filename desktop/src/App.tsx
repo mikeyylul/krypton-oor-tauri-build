@@ -6686,6 +6686,17 @@ function NewJobModal({
   const [mechanicalLevel, setMechanicalLevel] = useState<"CCA" | "LRU">("CCA");
   const [mechanicalRecipeId, setMechanicalRecipeId] = useState("");
   const [linkedJobIds, setLinkedJobIds] = useState<string[]>([]);
+  const customerFolders = useMemo(() => {
+    const folders = new Map<string, string>();
+    jobs.forEach((job) => {
+      const folder = job.customer.trim();
+      const key = folder.toLocaleLowerCase();
+      if (folder && !folders.has(key)) folders.set(key, folder);
+    });
+    return [...folders.values()].sort((left, right) =>
+      left.localeCompare(right, undefined, { sensitivity: "base" }),
+    );
+  }, [jobs]);
 
   const eligibleLinkedJobs = jobs.filter(
     (job) =>
@@ -6728,13 +6739,20 @@ function NewJobModal({
       otherProcess?: boolean;
     },
   ) {
+    const importedFields = {
+      ...parsed,
+      status: parsed.status || "Waiting on Parts",
+      createdDate: parsed.createdDate || chicagoDateKey(),
+    };
     const required = [...requiredDraftFields];
     if (parsed.polymerics) required.push("polymericsTurnDays");
     if (parsed.externalTesting) required.push("externalTestingTurnDays");
     if (parsed.otherProcess)
       required.push("otherSpecialProcess", "otherSpecialProcessTurnDays");
     setMissingFields(
-      new Set(required.filter((key) => !String(parsed[key] ?? "").trim())),
+      new Set(
+        required.filter((key) => !String(importedFields[key] ?? "").trim()),
+      ),
     );
     setDivisionMissing(!parsed.division);
     if (parsed.division) setDivision(parsed.division);
@@ -6748,7 +6766,7 @@ function NewJobModal({
         ({
           ...current,
           ...Object.fromEntries(
-            Object.entries(parsed).filter(
+            Object.entries(importedFields).filter(
               ([key]) =>
                 ![
                   "division",
@@ -7479,9 +7497,19 @@ function NewJobModal({
           <label className={`wide ${fieldClass("customer")}`}>
             Customer Sub-Category / Folder {missingMark("customer")}
             <input
+              list="new-project-customer-folders"
               value={fields.customer}
               onChange={(event) => setField("customer", event.target.value)}
+              placeholder="Search an existing folder or enter a new customer"
             />
+            <datalist id="new-project-customer-folders">
+              {customerFolders.map((folder) => (
+                <option key={folder} value={folder} />
+              ))}
+            </datalist>
+            <small>
+              Select an existing customer folder or type a new name to create one.
+            </small>
           </label>
           <label className={fieldClass("jobNumber")}>
             {mechanicalBuild ? "MECH JOB #" : "Job #"} {missingMark("jobNumber")}
