@@ -15,6 +15,11 @@ LOCAL AND OFFLINE DATA
 - The application has no automatic online updater.
 - The installer includes the WebView2 runtime needed for offline installation.
 
+RFQ FOLDER SHORTCUTS
+- In Settings, assign separate Commercial and Aerospace Windows shortcut files.
+- In Quotes, use the matching Create RFQ Folder button to run the assigned local shortcut.
+- Shortcut paths stay only in this application's local storage.
+
 PHOTO SCANNING
 - OCR worker, engine, and English recognition data are included inside the application.
 - New-job screenshots, RFQ photos, old job bookings, and shortage-list images scan without downloading recognition files.
