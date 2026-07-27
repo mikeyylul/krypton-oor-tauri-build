@@ -294,6 +294,27 @@ const rfqTags: RFQTag[] = [
 const storageKey = "projectflow-manufacturing-v3";
 const quotesStorageKey = "krypton-oor-quotes-v1";
 const weeklyActionsStorageKey = "krypton-oor-weekly-actions-v1";
+const rfqShortcutStorageKey = "krypton-oor-rfq-shortcuts-v1";
+
+type RfqShortcutSettings = Record<Division, string>;
+
+type DesktopBridgeWindow = Window & {
+  __TAURI_INTERNALS__?: {
+    invoke: <T>(
+      command: string,
+      args?: Record<string, unknown>,
+    ) => Promise<T>;
+  };
+};
+
+function desktopInvoke<T>(
+  command: string,
+  args?: Record<string, unknown>,
+) {
+  const bridge = (window as DesktopBridgeWindow).__TAURI_INTERNALS__;
+  if (!bridge?.invoke) return null;
+  return bridge.invoke<T>(command, args);
+}
 const assemblyRecipesStorageKey = "krypton-oor-assembly-recipes-v1";
 
 function chicagoDateKey() {
@@ -390,6 +411,18 @@ function currentWorkWeek(): WeeklyWorkWeek {
   return { weekStart, weekEnd: days[4].date, days };
 }
 
+function workWeekFromStart(weekStart: string): WeeklyWorkWeek {
+  const days = Array.from({ length: 5 }, (_, index) => ({
+    date: addCalendarDays(weekStart, index),
+    tasks: [],
+  }));
+  return { weekStart, weekEnd: days[4].date, days };
+}
+
+function shiftWorkWeek(weekStart: string, weeks: number) {
+  return addCalendarDays(weekStart, weeks * 7);
+}
+
 function normalizeWeeklyActions(
   saved: WeeklyActionsState | null,
 ): WeeklyActionsState {
@@ -411,13 +444,45 @@ function normalizeWeeklyActions(
       archives: Array.isArray(saved.archives) ? saved.archives : [],
     };
   }
+  const savedWeeks = Array.isArray(saved.archives) ? saved.archives : [];
+  const savedCurrentWeek = savedWeeks.find(
+    (week) => week.weekStart === fresh.weekStart,
+  );
   const hasTasks = saved.current.days.some((day) => day.tasks?.length);
   return {
-    current: fresh,
+    current: savedCurrentWeek ?? fresh,
     archives: [
       ...(hasTasks ? [saved.current] : []),
-      ...(Array.isArray(saved.archives) ? saved.archives : []),
-    ].slice(0, 52),
+      ...savedWeeks.filter(
+        (week) =>
+          week.weekStart !== fresh.weekStart &&
+          week.weekStart !== saved.current.weekStart,
+      ),
+    ].slice(0, 104),
+  };
+}
+
+function updateWeeklyActionsWeek(
+  state: WeeklyActionsState,
+  week: WeeklyWorkWeek,
+) {
+  if (week.weekStart === state.current.weekStart) {
+    return { ...state, current: week };
+  }
+  const exists = state.archives.some(
+    (candidate) => candidate.weekStart === week.weekStart,
+  );
+  return {
+    ...state,
+    archives: (
+      exists
+        ? state.archives.map((candidate) =>
+            candidate.weekStart === week.weekStart ? week : candidate,
+          )
+        : [...state.archives, week]
+    )
+      .sort((a, b) => b.weekStart.localeCompare(a.weekStart))
+      .slice(0, 104),
   };
 }
 
@@ -558,17 +623,20 @@ function pcbaReadyForKitting(job: Job) {
 
 function activePartialDockDate(job: Job) {
   if (!job.acceptedPartials || !job.partialDeliveries.length) return "";
+  const ordered = [...job.partialDeliveries].sort(
+    (a, b) => a.dueDate.localeCompare(b.dueDate),
+  );
   return (
-    job.partialDeliveries.find((partial) => !partial.completed)?.dueDate ||
-    job.partialDeliveries.at(-1)?.dueDate ||
+    ordered.find((partial) => !partial.completed)?.dueDate ||
+    ordered.at(-1)?.dueDate ||
     ""
   );
 }
 
 function kryptonDockDate(job: Job) {
-  if (job.kryptonDockDateOverride) return job.kryptonDockDateOverride;
   const partialDockDate = activePartialDockDate(job);
   if (partialDockDate) return partialDockDate;
+  if (job.kryptonDockDateOverride) return job.kryptonDockDateOverride;
   const readyDate = materialsReadyDate(job);
   if (!readyDate) return "";
   return addBusinessDays(
@@ -857,13 +925,15 @@ function actionItemsForJobs(jobs: Job[]): ActionItem[] {
         });
       }
       if (job.acceptedPartials) {
-        job.partialDeliveries.forEach((partial) =>
-          addIfSoon(
-            `partial-${partial.id}`,
-            `Accepted Partial: QTY ${partial.quantity}${partial.comments ? ` · ${partial.comments}` : ""}`,
-            partial.dueDate,
-          ),
-        );
+        job.partialDeliveries
+          .filter((partial) => !partial.completed)
+          .forEach((partial) =>
+            addIfSoon(
+              `partial-${partial.id}`,
+              `Accepted Partial: QTY ${partial.quantity}${partial.comments ? ` · ${partial.comments}` : ""}`,
+              partial.dueDate,
+            ),
+          );
       }
       if (buildLevel !== "PCBA") {
         const familyJobs = jobs.filter(
@@ -1368,7 +1438,7 @@ const navItems: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "quotes", label: "Quotes", icon: FileText },
   { id: "actions", label: "List of Action Items", icon: AlertTriangle },
   { id: "follow-ups", label: "Follow Up List", icon: StickyNote },
-  { id: "integrations", label: "Data & Backup", icon: FileSpreadsheet },
+  { id: "integrations", label: "Settings", icon: Settings2 },
 ];
 
 export default function Home() {
@@ -1394,6 +1464,11 @@ export default function Home() {
     archives: [],
   }));
   const [weeklyActionsHydrated, setWeeklyActionsHydrated] = useState(false);
+  const [rfqShortcuts, setRfqShortcuts] = useState<RfqShortcutSettings>({
+    Commercial: "",
+    Aerospace: "",
+  });
+  const [rfqShortcutsHydrated, setRfqShortcutsHydrated] = useState(false);
   const [assemblyRecipes, setAssemblyRecipes] = useState<AssemblyRecipe[]>([]);
   const [assemblyRecipesHydrated, setAssemblyRecipesHydrated] = useState(false);
 
@@ -1414,6 +1489,30 @@ export default function Home() {
       const jobId = params.get("job");
       if (jobId) setSelectedJobId(jobId);
       if (params.get("new") === "1") setShowNewJob(true);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
+  useEffect(() => {
+    let restored: RfqShortcutSettings = {
+      Commercial: "",
+      Aerospace: "",
+    };
+    try {
+      const raw = window.localStorage.getItem(rfqShortcutStorageKey);
+      if (raw) {
+        const saved = JSON.parse(raw) as Partial<RfqShortcutSettings>;
+        restored = {
+          Commercial: saved.Commercial ?? "",
+          Aerospace: saved.Aerospace ?? "",
+        };
+      }
+    } catch {
+      window.localStorage.removeItem(rfqShortcutStorageKey);
+    }
+    const frame = requestAnimationFrame(() => {
+      setRfqShortcuts(restored);
+      setRfqShortcutsHydrated(true);
     });
     return () => cancelAnimationFrame(frame);
   }, []);
@@ -1526,6 +1625,14 @@ export default function Home() {
       );
     }
   }, [weeklyActions, weeklyActionsHydrated]);
+
+  useEffect(() => {
+    if (!rfqShortcutsHydrated) return;
+    window.localStorage.setItem(
+      rfqShortcutStorageKey,
+      JSON.stringify(rfqShortcuts),
+    );
+  }, [rfqShortcuts, rfqShortcutsHydrated]);
   useEffect(() => {
     if (assemblyRecipesHydrated) {
       window.localStorage.setItem(
@@ -1690,6 +1797,50 @@ export default function Home() {
     );
   }
 
+  async function assignRfqShortcut(division: Division) {
+    const request = desktopInvoke<string | null>("pick_rfq_shortcut", {
+      division,
+    });
+    if (!request) {
+      notify("RFQ folder shortcuts can be assigned in the Windows app.");
+      return;
+    }
+    try {
+      const selected = await request;
+      if (!selected) return;
+      setRfqShortcuts((current) => ({ ...current, [division]: selected }));
+      notify(`${division} RFQ shortcut assigned.`);
+    } catch {
+      notify("The shortcut could not be selected.");
+    }
+  }
+
+  async function runRfqShortcut(division: Division) {
+    const shortcutPath = rfqShortcuts[division];
+    if (!shortcutPath) {
+      notify(
+        `Assign the ${division} RFQ shortcut in Settings before using this button.`,
+      );
+      return;
+    }
+    const request = desktopInvoke<void>("run_rfq_shortcut", {
+      division,
+      shortcutPath,
+    });
+    if (!request) {
+      notify("RFQ folder shortcuts can only run from the Windows app.");
+      return;
+    }
+    try {
+      await request;
+      notify(`${division} RFQ folder task started.`);
+    } catch {
+      notify(
+        `The ${division} shortcut could not be opened. Reassign it in Settings.`,
+      );
+    }
+  }
+
   function bookOldJob(job: Job) {
     setJobs((current) => reconcileAssemblyStatuses([normalizeJob(job), ...current]));
     notify(`Job #${job.jobNumber} confirmed and booked in ${job.customer}.`);
@@ -1774,10 +1925,6 @@ export default function Home() {
             `${item.quantityPerAssembly} × ${item.inputLevel} ${item.pn}${item.rev ? ` Rev ${item.rev}` : ""}`,
         )
         .join("; "),
-      "Project Notes": (job.notes ?? [])
-        .map((note) => `${note.date || "No date"}: ${note.text}`)
-        .join("\n"),
-      "Project Notes Data": JSON.stringify(job.notes ?? []),
     }));
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(
@@ -1800,7 +1947,7 @@ export default function Home() {
         "Record ID": "Krypton Solutions OOR",
         Payload: JSON.stringify({
           format: "krypton-solutions-oor-backup",
-          version: 2,
+          version: 1,
           exportedAt: new Date().toISOString(),
         }),
       },
@@ -1808,11 +1955,6 @@ export default function Home() {
         "Record Type": "Job",
         "Record ID": job.id,
         Payload: JSON.stringify(job),
-      })),
-      ...jobs.map((job) => ({
-        "Record Type": "Job Notes",
-        "Record ID": job.id,
-        Payload: JSON.stringify(job.notes ?? []),
       })),
       ...quotes.map((quote) => ({
         "Record Type": "Quote",
@@ -1838,14 +1980,13 @@ export default function Home() {
       ["Krypton Solutions OOR Complete Backup"],
       ["Exported", new Date().toLocaleString()],
       ["Jobs", jobs.length],
-      ["Project Notes", jobs.reduce((count, job) => count + (job.notes?.length ?? 0), 0)],
       ["Quotes", quotes.length],
       ["Assembly Configurations", assemblyRecipes.length],
       ["Weekly Action Archives", weeklyActions.archives.length],
       [],
       [
         "Important",
-        "Use Data & Backup > Import Complete Backup to restore this file. Do not edit the Complete Backup sheet.",
+        "Use Settings > Import Complete Backup to restore this file. Do not edit the Complete Backup sheet.",
       ],
     ]);
     summarySheet["!cols"] = [{ wch: 28 }, { wch: 100 }];
@@ -1870,7 +2011,6 @@ export default function Home() {
       });
       const parsed = rows.map((row) => ({
         type: String(row["Record Type"] ?? ""),
-        id: String(row["Record ID"] ?? ""),
         payload: String(row.Payload ?? ""),
       }));
       const infoRow = parsed.find((row) => row.type === "Backup Info");
@@ -1878,23 +2018,9 @@ export default function Home() {
       if (info?.format !== "krypton-solutions-oor-backup") {
         throw new Error("Invalid backup format");
       }
-      const importedNotes = new Map(
-        parsed
-          .filter((row) => row.type === "Job Notes")
-          .map((row) => [row.id, row.payload]),
-      );
       const importedJobs = parsed
         .filter((row) => row.type === "Job")
-        .map((row) => {
-          const job = normalizeJob(JSON.parse(row.payload) as Job);
-          const notesPayload = importedNotes.get(job.id);
-          if (!notesPayload) return job;
-          const notes = JSON.parse(notesPayload);
-          return {
-            ...job,
-            notes: Array.isArray(notes) ? notes : job.notes,
-          };
-        });
+        .map((row) => normalizeJob(JSON.parse(row.payload) as Job));
       const importedQuotes = parsed
         .filter((row) => row.type === "Quote")
         .map((row) => normalizeQuote(JSON.parse(row.payload) as QuoteRecord));
@@ -2045,9 +2171,9 @@ export default function Home() {
             onClick={() => setActiveView("integrations")}
           >
             <span className="connection-label">
-              <FileSpreadsheet size={16} /> Data + Backup
+              <Settings2 size={16} /> Settings
             </span>
-            <small>Imports, exports, and reminder setup</small>
+            <small>Backups, imports, and RFQ folder tasks</small>
           </button>
           <div className="profile-card">
             <span className="avatar">MN</span>
@@ -2126,7 +2252,8 @@ export default function Home() {
             quotes={quotes}
             onNew={() => setShowNewRfq(true)}
             onOpen={openQuoteWindow}
-            onUpdate={updateQuote}
+            onComplete={(id, completed) => updateQuote(id, { completed })}
+            onRunShortcut={runRfqShortcut}
           />
         )}
         {activeView === "configurations" && (
@@ -2154,6 +2281,8 @@ export default function Home() {
             onImportBackup={importCompleteBackup}
             onOpenOldData={() => setShowOldDataImport(true)}
             weeklyArchives={weeklyActions.archives}
+            rfqShortcuts={rfqShortcuts}
+            onAssignRfqShortcut={assignRfqShortcut}
           />
         )}
       </main>
@@ -2204,10 +2333,8 @@ export default function Home() {
         </div>
       )}
       <WeeklyNotepad
-        week={weeklyActions.current}
-        onChange={(current) =>
-          setWeeklyActions((state) => ({ ...state, current }))
-        }
+        state={weeklyActions}
+        onChange={setWeeklyActions}
       />
     </div>
   );
@@ -2453,7 +2580,7 @@ function DivisionView({
         await navigator.clipboard.writeText(plain);
       }
       notify(
-        `${division} Production Agenda copied. Paste it directly into your email.`,
+        `${division} Production Agenda copied to the clipboard.`,
       );
     } catch {
       notify("Copy was blocked by the browser. Please try again.");
@@ -2602,17 +2729,22 @@ function QuotesView({
   quotes,
   onNew,
   onOpen,
-  onUpdate,
+  onComplete,
+  onRunShortcut,
 }: {
   quotes: QuoteRecord[];
   onNew: () => void;
   onOpen: (id: string) => void;
-  onUpdate: (id: string, change: Partial<QuoteRecord>) => void;
+  onComplete: (id: string, completed: boolean) => void;
+  onRunShortcut: (division: Division) => void;
 }) {
-  function customerGroups(division: Division) {
+  function customerGroups(division: Division, completed = false) {
     return Object.entries(
       quotes
-        .filter((quote) => quote.division === division)
+        .filter(
+          (quote) =>
+            quote.division === division && quote.completed === completed,
+        )
         .reduce<Record<string, QuoteRecord[]>>((groups, quote) => {
           (groups[quote.customer] ??= []).push(quote);
           return groups;
@@ -2628,13 +2760,19 @@ function QuotesView({
   }
 
   const urgentQuotes = [...quotes]
-    .filter(
-      (quote) =>
-        !quote.completed && quoteUrgency(quote.dueDate) !== "scheduled",
-    )
+    .filter((quote) => !quote.completed)
+    .filter((quote) => quoteUrgency(quote.dueDate) !== "scheduled")
     .sort(
       (a, b) =>
         a.dueDate.localeCompare(b.dueDate) ||
+        a.division.localeCompare(b.division) ||
+        a.customer.localeCompare(b.customer),
+    );
+  const completedQuotes = quotes
+    .filter((quote) => quote.completed)
+    .sort(
+      (a, b) =>
+        b.dueDate.localeCompare(a.dueDate) ||
         a.division.localeCompare(b.division) ||
         a.customer.localeCompare(b.customer),
     );
@@ -2670,9 +2808,23 @@ function QuotesView({
             for its complete details and notes.
           </p>
         </div>
-        <button className="button primary new-rfq-button" onClick={onNew}>
-          <Plus size={17} /> New RFQ
-        </button>
+        <div className="quotes-header-actions">
+          <button
+            className="button secondary"
+            onClick={() => onRunShortcut("Commercial")}
+          >
+            <Folder size={17} /> Create RFQ Folder for Commercial
+          </button>
+          <button
+            className="button secondary"
+            onClick={() => onRunShortcut("Aerospace")}
+          >
+            <Folder size={17} /> Create RFQ Folder for Aerospace
+          </button>
+          <button className="button primary new-rfq-button" onClick={onNew}>
+            <Plus size={17} /> New RFQ
+          </button>
+        </div>
       </div>
 
       <div className="quote-division-grid">
@@ -2711,6 +2863,7 @@ function QuotesView({
                       </div>
                       <div className="quote-table">
                         <div className="quote-table-head">
+                          <span>Complete</span>
                           <span>Contact</span>
                           <span>Tags</span>
                           <span>PN#</span>
@@ -2718,15 +2871,36 @@ function QuotesView({
                           <span>QTY</span>
                           <span>KSID</span>
                           <span>Due Date</span>
-                          <span>Complete</span>
+                          <span />
                         </div>
                         {customerQuotes.map((quote) => (
-                          <button
+                          <div
                             className="quote-table-row"
                             key={quote.id}
                             onClick={() => onOpen(quote.id)}
-                            aria-label={`Open ${quote.customer} RFQ for PN ${quote.pn}`}
+                            role="button"
+                            tabIndex={0}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                onOpen(quote.id);
+                              }
+                            }}
+                            aria-label={`Open ${quote.customer} RFQ for PN ${quote.pn}${quote.completed ? ", completed" : ""}`}
                           >
+                            <span
+                              className="quote-complete-cell"
+                              onClick={(event) => event.stopPropagation()}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={quote.completed}
+                                onChange={(event) =>
+                                  onComplete(quote.id, event.target.checked)
+                                }
+                                aria-label={`Mark RFQ for PN ${quote.pn} ${quote.completed ? "incomplete" : "complete"}`}
+                              />
+                            </span>
                             <span>{quote.contact}</span>
                             <span className="quote-row-tags">
                               {quote.tags.length ? (
@@ -2755,23 +2929,8 @@ function QuotesView({
                                 </em>
                               )}
                             </span>
-                            <span
-                              className="rfq-completion-control"
-                              onClick={(event) => event.stopPropagation()}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={quote.completed}
-                                onChange={(event) =>
-                                  onUpdate(quote.id, {
-                                    completed: event.target.checked,
-                                  })
-                                }
-                                aria-label={`Mark RFQ for ${quote.pn} complete`}
-                              />
-                              {quote.completed ? "Completed" : "Complete"}
-                            </span>
-                          </button>
+                            <ChevronRight size={17} />
+                          </div>
                         ))}
                       </div>
                     </section>
@@ -2842,6 +3001,77 @@ function QuotesView({
           })}
         </div>
       </section>
+
+      <details className="panel completed-rfqs-section">
+        <summary>
+          <span>
+            <CheckCircle2 size={18} />
+            <strong>Completed RFQs</strong>
+            <small>Archived RFQs removed from the active queue</small>
+          </span>
+          <b>{completedQuotes.length}</b>
+        </summary>
+        <div className="completed-rfqs-content">
+          {completedQuotes.length ? (
+            <div className="quote-table completed-rfq-table">
+              <div className="quote-table-head">
+                <span>Restore</span>
+                <span>Section</span>
+                <span>Customer</span>
+                <span>PN#</span>
+                <span>Rev</span>
+                <span>QTY</span>
+                <span>KSID</span>
+                <span>Due Date</span>
+                <span />
+              </div>
+              {completedQuotes.map((quote) => (
+                <div
+                  className="quote-table-row"
+                  key={quote.id}
+                  onClick={() => onOpen(quote.id)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      onOpen(quote.id);
+                    }
+                  }}
+                >
+                  <span
+                    className="quote-complete-cell"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={quote.completed}
+                      onChange={(event) =>
+                        onComplete(quote.id, event.target.checked)
+                      }
+                      aria-label={`Restore RFQ for PN ${quote.pn} to the active queue`}
+                    />
+                  </span>
+                  <span>{quote.division}</span>
+                  <span>{quote.customer}</span>
+                  <span><strong>{quote.pn}</strong></span>
+                  <span>{quote.rev || "—"}</span>
+                  <span>{quote.quantity || "—"}</span>
+                  <span>{quote.ksid || "—"}</span>
+                  <span>{dateLabel(quote.dueDate)}</span>
+                  <ChevronRight size={17} />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="quote-empty-state">
+              <CheckCircle2 size={26} />
+              <strong>No completed RFQs yet</strong>
+              <p>RFQs appear here after you check them complete.</p>
+            </div>
+          )}
+        </div>
+      </details>
     </section>
   );
 }
@@ -3117,22 +3347,19 @@ function QuoteDetailWindow({
             <p>Created {dateLabel(quote.createdAt.slice(0, 10))}</p>
           </div>
           <div className="quote-detail-header-actions">
-            <label className="rfq-completion-control">
-              <input
-                type="checkbox"
-                checked={quote.completed}
-                onChange={(event) =>
-                  onUpdate({ completed: event.target.checked })
-                }
-              />
-              {quote.completed ? "Completed" : "Mark complete"}
-            </label>
             <button
               className={`button small ${editingDetails ? "primary" : "secondary"}`}
               onClick={() => setEditingDetails((current) => !current)}
             >
               <Settings2 size={15} />
               {editingDetails ? "Done editing" : "Edit quote details"}
+            </button>
+            <button
+              className={`button small ${quote.completed ? "primary" : "secondary"}`}
+              onClick={() => onUpdate({ completed: !quote.completed })}
+            >
+              <CheckCircle2 size={15} />
+              {quote.completed ? "Completed" : "Mark complete"}
             </button>
             <button className="icon-button" aria-label="Close quote" onClick={onClose}>
               <X />
@@ -3435,12 +3662,20 @@ function ActionItemsView({
   const [dueFilter, setDueFilter] = useState<
     "all" | "past-due" | "due-today" | "due-tomorrow"
   >("all");
+  const [customerFilter, setCustomerFilter] = useState("all");
+  const customers = [...new Set(items.map((item) => item.customer))]
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
   const filteredItems = items.filter((item) => {
+    if (customerFilter !== "all" && item.customer !== customerFilter) {
+      return false;
+    }
+    if (dueFilter === "all") return true;
+    if (!item.dueDate) return false;
     const days = daysUntil(item.dueDate);
     if (dueFilter === "past-due") return days < 0;
     if (dueFilter === "due-today") return days === 0;
-    if (dueFilter === "due-tomorrow") return days === 1;
-    return true;
+    return days === 1;
   });
   const groupedByJob = filteredItems.reduce<Record<string, ActionItem[]>>((groups, item) => {
     (groups[item.jobId] ??= []).push(item);
@@ -3457,24 +3692,40 @@ function ActionItemsView({
           </p>
         </div>
         <span className="action-total">
-          <AlertTriangle size={18} /> {filteredItems.length} outstanding
+          <AlertTriangle size={18} /> {filteredItems.length} shown
         </span>
       </div>
-      <div className="action-filter-bar" role="group" aria-label="Filter action items">
-        {([
-          ["all", "All"],
-          ["past-due", "Past Due"],
-          ["due-tomorrow", "1 Day Until Due"],
-          ["due-today", "Due Today"],
-        ] as const).map(([value, label]) => (
-          <button
-            key={value}
-            className={`button small ${dueFilter === value ? "primary" : "secondary"}`}
-            onClick={() => setDueFilter(value)}
+      <div className="action-filter-bar" role="group" aria-label="Filter action items by due date">
+        <div className="action-due-filters">
+          {([
+            ["all", "All"],
+            ["past-due", "Past Due"],
+            ["due-tomorrow", "1 Day Until Due"],
+            ["due-today", "Due Today"],
+          ] as const).map(([value, label]) => (
+            <button
+              key={value}
+              className={`button small ${dueFilter === value ? "primary" : "secondary"}`}
+              onClick={() => setDueFilter(value)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <label className="action-customer-filter">
+          <span>Customer</span>
+          <select
+            value={customerFilter}
+            onChange={(event) => setCustomerFilter(event.target.value)}
           >
-            {label}
-          </button>
-        ))}
+            <option value="all">All Customers</option>
+            {customers.map((customer) => (
+              <option key={customer} value={customer}>
+                {customer}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
       {(["Commercial", "Aerospace"] as Division[]).map((division) => {
         const divisionItems = filteredItems.filter(
@@ -3552,7 +3803,7 @@ function ActionItemsView({
               </div>
             ) : (
               <div className="clear-state">
-                <CheckCircle2 size={20} /> No overdue or next-day actions.
+                <CheckCircle2 size={20} /> No action items match this filter.
               </div>
             )}
           </section>
@@ -4088,7 +4339,7 @@ function ShortageEditor({
       } else {
         await navigator.clipboard.writeText(plain);
       }
-      notify("Customer shortage table copied. Paste it directly into your email.");
+      notify("Customer shortage table copied to the clipboard.");
     } catch {
       notify("Copy was blocked by the browser. Select the table and copy it manually.");
     }
@@ -4332,38 +4583,69 @@ function ShortageEditor({
 }
 
 function WeeklyNotepad({
-  week,
+  state,
   onChange,
 }: {
-  week: WeeklyWorkWeek;
-  onChange: (week: WeeklyWorkWeek) => void;
+  state: WeeklyActionsState;
+  onChange: (state: WeeklyActionsState) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState("");
   const today = chicagoDateKey();
-  const defaultDay = week.days.find((day) => day.date === today)?.date;
+  const [selectedWeekStart, setSelectedWeekStart] = useState(
+    state.current.weekStart,
+  );
+  const selectedWeek =
+    selectedWeekStart === state.current.weekStart
+      ? state.current
+      : state.archives.find(
+          (week) => week.weekStart === selectedWeekStart,
+        ) ?? workWeekFromStart(selectedWeekStart);
+  const defaultDay = selectedWeek.days.find((day) => day.date === today)?.date;
   const [selectedDate, setSelectedDate] = useState(
-    defaultDay ?? week.days[0]?.date ?? "",
+    defaultDay ?? selectedWeek.days[0]?.date ?? "",
   );
 
   const selectedDay =
-    week.days.find((day) => day.date === selectedDate) ?? week.days[0];
-  const openTaskCount = week.days.reduce(
+    selectedWeek.days.find((day) => day.date === selectedDate) ??
+    selectedWeek.days[0];
+  const openTaskCount = state.current.days.reduce(
     (total, day) =>
       total + day.tasks.filter((task) => !task.complete).length,
     0,
   );
 
+  function moveWeek(direction: number) {
+    const nextStart = shiftWorkWeek(selectedWeek.weekStart, direction);
+    const nextWeek =
+      nextStart === state.current.weekStart
+        ? state.current
+        : state.archives.find((week) => week.weekStart === nextStart) ??
+          workWeekFromStart(nextStart);
+    setSelectedWeekStart(nextStart);
+    setSelectedDate(nextWeek.days[0]?.date ?? "");
+  }
+
+  function returnToCurrentWeek() {
+    setSelectedWeekStart(state.current.weekStart);
+    setSelectedDate(
+      state.current.days.find((day) => day.date === today)?.date ??
+        state.current.days[0]?.date ??
+        "",
+    );
+  }
+
   function updateDay(
     date: string,
     update: (tasks: WeeklyTask[]) => WeeklyTask[],
   ) {
-    onChange({
-      ...week,
-      days: week.days.map((day) =>
+    const updatedWeek = {
+      ...selectedWeek,
+      days: selectedWeek.days.map((day) =>
         day.date === date ? { ...day, tasks: update(day.tasks) } : day,
       ),
-    });
+    };
+    onChange(updateWeeklyActionsWeek(state, updatedWeek));
   }
 
   function addTask(event: FormEvent) {
@@ -4386,30 +4668,53 @@ function WeeklyNotepad({
     return (
       <button className="weekly-notepad-launcher" onClick={() => setOpen(true)}>
         <StickyNote size={19} />
-        <span>Weekly Notes</span>
+        <span>Weekly Actions</span>
         {openTaskCount > 0 && <b>{openTaskCount}</b>}
       </button>
     );
   }
 
   return (
-    <aside className="weekly-notepad" aria-label="Current week notepad">
+    <aside className="weekly-notepad" aria-label="Weekly Actions">
       <header>
         <div>
           <span className="notepad-title">
-            <StickyNote size={17} /> Current Week
+            <StickyNote size={17} /> Weekly Actions
           </span>
           <small>
-            {dateLabel(week.weekStart)} – {dateLabel(week.weekEnd)}
+            {dateLabel(selectedWeek.weekStart)} – {dateLabel(selectedWeek.weekEnd)}
           </small>
         </div>
-        <button aria-label="Minimize weekly notepad" onClick={() => setOpen(false)}>
-          <ChevronDown size={18} />
-        </button>
+        <div className="weekly-window-actions">
+          <button
+            aria-label="Previous week"
+            onClick={() => moveWeek(-1)}
+            title="Previous week"
+          >
+            <ChevronLeft size={18} />
+          </button>
+          <button
+            className="weekly-current-button"
+            onClick={returnToCurrentWeek}
+            disabled={selectedWeek.weekStart === state.current.weekStart}
+          >
+            Today
+          </button>
+          <button
+            aria-label="Next week"
+            onClick={() => moveWeek(1)}
+            title="Next week"
+          >
+            <ChevronRight size={18} />
+          </button>
+          <button aria-label="Minimize weekly actions" onClick={() => setOpen(false)}>
+            <ChevronDown size={18} />
+          </button>
+        </div>
       </header>
       <div className="weekly-notepad-body">
         <div className="notepad-days" role="tablist" aria-label="Work week">
-          {week.days.map((day) => {
+          {selectedWeek.days.map((day) => {
             const parsed = new Date(`${day.date}T12:00:00`);
             const complete = day.tasks.filter((task) => task.complete).length;
             return (
@@ -4496,7 +4801,7 @@ function WeeklyNotepad({
         </div>
       </div>
       <footer>
-        Previous weeks move to <strong>Data &amp; Backup → Weekly Actions</strong>.
+        Use the arrows to add or review action notes in past and future weeks.
       </footer>
     </aside>
   );
@@ -4508,32 +4813,69 @@ function IntegrationsView({
   onImportBackup,
   onOpenOldData,
   weeklyArchives,
+  rfqShortcuts,
+  onAssignRfqShortcut,
 }: {
   onExport: () => void;
   onExportBackup: () => void;
   onImportBackup: (event: ChangeEvent<HTMLInputElement>) => void;
   onOpenOldData: () => void;
   weeklyArchives: WeeklyWorkWeek[];
+  rfqShortcuts: RfqShortcutSettings;
+  onAssignRfqShortcut: (division: Division) => void;
 }) {
   return (
     <section className="view-stack">
       <div className="view-intro">
         <div>
-          <h2>Data and Backup</h2>
+          <h2>Settings</h2>
           <p>
-            Move job data and shortage lists between Krypton Solutions OOR and
-            Microsoft Office.
+            Manage local backups, data imports, weekly history, and Windows RFQ
+            folder shortcuts.
           </p>
         </div>
       </div>
       <div className="integration-grid">
+        <article className="panel integration-card rfq-shortcut-card">
+          <span className="integration-icon shortcut">
+            <FolderKanban />
+          </span>
+          <div>
+            <small>Windows application</small>
+            <h3>Assign RFQ Folder Task</h3>
+            <p>
+              Choose the Commercial and Aerospace desktop shortcuts that the
+              Quotes menu should run.
+            </p>
+          </div>
+          <div className="rfq-shortcut-settings">
+            {(["Commercial", "Aerospace"] as Division[]).map((division) => (
+              <div key={division}>
+                <span>
+                  <strong>{division} RFQ Shortcut</strong>
+                  <small title={rfqShortcuts[division]}>
+                    {rfqShortcuts[division]
+                      ? rfqShortcuts[division].split(/[\\/]/).at(-1)
+                      : "Not assigned"}
+                  </small>
+                </span>
+                <button
+                  className="button secondary small"
+                  onClick={() => onAssignRfqShortcut(division)}
+                >
+                  <Folder size={15} /> Choose shortcut
+                </button>
+              </div>
+            ))}
+          </div>
+        </article>
         <article className="panel integration-card complete-backup-card">
           <span className="integration-icon excel">
             <FileSpreadsheet />
           </span>
           <div>
             <small>Move everything to another computer</small>
-            <h3>Complete Excel backup &amp; restore</h3>
+            <h3>Complete backup &amp; restore</h3>
             <p>
               Export all jobs, quotes, shortages, notes, tracking, completed
               records, assembly configurations, Project Families, and Weekly
@@ -4581,11 +4923,11 @@ function IntegrationsView({
             <CheckCircle2 />
           </span>
           <div>
-            <small>Archived automatically</small>
+            <small>Past and future weeks</small>
             <h3>Weekly Actions</h3>
             <p>
-              Prior Monday–Friday notepad entries are stored here when a new
-              week begins.
+              Monday–Friday entries are saved locally and remain available when
+              you move between weeks.
             </p>
           </div>
           <div className="weekly-archive-list">
@@ -4636,7 +4978,7 @@ function IntegrationsView({
           </span>
           <div>
             <small>Job register</small>
-            <h3>Excel export</h3>
+            <h3>Job export</h3>
             <p>
               Download all commercial and aerospace job fields as a formatted
               .xlsx workbook.
@@ -4654,8 +4996,9 @@ function IntegrationsView({
             <small>Shortage lists</small>
             <h3>Excel and screenshot upload</h3>
             <p>
-              Upload .xlsx, .xls, .csv, or a clear screenshot. Missing scanned
-              values are highlighted in red for manual entry.
+              Upload .xlsx, .xls, .csv, or a clear shortage-table screenshot.
+              PCB rows and green received rows are ignored; Customer Supplied
+              rows are checked automatically.
             </p>
           </div>
         </article>
@@ -5384,10 +5727,12 @@ function legacyRowFromRecord(
     quoteNumber: cleanImportedCell(
       value("Quote#", "Quote Number", "Quote"),
     ),
-    status: matchingJobStatus(value("Status")),
-    createdDate: normalizeUploadedDate(
-      value("Project Creation Date", "Creation Date", "Booked Date"),
-    ),
+    status:
+      matchingJobStatus(value("Status")) || "Waiting on Parts",
+    createdDate:
+      normalizeUploadedDate(
+        value("Project Creation Date", "Creation Date", "Booked Date"),
+      ) || chicagoDateKey(),
     fabricationTurnDays:
       cleanImportedCell(value("Fabrication Turn Time", "Fab Turn Time")).match(
         /\d+/,
@@ -5456,29 +5801,6 @@ function wordsFromTsv(tsv: string) {
       } satisfies OcrWord;
     })
     .filter((word): word is OcrWord => Boolean(word));
-}
-
-function parseBookingQuantityFromTsv(tsv: string) {
-  const words = wordsFromTsv(tsv);
-  const quantityLabel = words.find((word) => {
-    const normalized = normalizeHeading(word.text);
-    return normalized === "quantity" || /^q[a-z]?y$/.test(normalized);
-  });
-  if (!quantityLabel) return "";
-  const labelCenter = quantityLabel.top + quantityLabel.height / 2;
-  return (
-    words
-      .filter((word) => {
-        const center = word.top + word.height / 2;
-        return (
-          word.left > quantityLabel.left + quantityLabel.width + 4 &&
-          Math.abs(center - labelCenter) <= Math.max(12, quantityLabel.height)
-        );
-      })
-      .sort((a, b) => a.left - b.left)
-      .map((word) => cleanImportedCell(word.text).match(/^\d+$/)?.[0] ?? "")
-      .find(Boolean) ?? ""
-  );
 }
 
 function parseLegacyRowsFromTsv(tsv: string) {
@@ -5879,7 +6201,7 @@ function parseProjectOcrTable(text: string): Partial<JobDraft> {
 
 async function recognizeScreenshotData(
   file: File,
-  pageSegmentationMode?: string,
+  pageSegmentationMode?: import("tesseract.js").PSM | string,
 ) {
   const tesseract = (
     await import("tesseract.js/dist/tesseract.esm.min.js")
@@ -5896,93 +6218,120 @@ async function recognizeScreenshotData(
   });
   await worker.setParameters({
     tessedit_pageseg_mode:
-      pageSegmentationMode ?? tesseract.PSM.SINGLE_BLOCK,
+      (pageSegmentationMode ??
+        tesseract.PSM.SINGLE_BLOCK) as import("tesseract.js").PSM,
     preserve_interword_spaces: "1",
     user_defined_dpi: "300",
   });
 
-  let images: Array<File | HTMLCanvasElement> = [file];
+  let image: File | HTMLCanvasElement = file;
+  const greenBands: Array<{ top: number; bottom: number }> = [];
   if (typeof createImageBitmap === "function") {
     try {
       const bitmap = await createImageBitmap(file);
-      const scale = Math.max(
-        2,
-        Math.min(
-          3,
-          Math.ceil(3200 / Math.max(bitmap.width, bitmap.height)),
-        ),
-      );
-      const grayscaleCanvas = document.createElement("canvas");
-      grayscaleCanvas.width = Math.round(bitmap.width * scale);
-      grayscaleCanvas.height = Math.round(bitmap.height * scale);
-      const grayscaleContext = grayscaleCanvas.getContext("2d");
-      if (grayscaleContext) {
-        grayscaleContext.imageSmoothingEnabled = true;
-        grayscaleContext.imageSmoothingQuality = "high";
-        grayscaleContext.drawImage(
-          bitmap,
+      const scale = Math.max(2, Math.min(4, 1800 / bitmap.width));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(bitmap.width * scale);
+      canvas.height = Math.round(bitmap.height * scale);
+      const context = canvas.getContext("2d");
+      if (context) {
+        context.imageSmoothingEnabled = true;
+        context.imageSmoothingQuality = "high";
+        context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        const imageData = context.getImageData(
           0,
           0,
-          grayscaleCanvas.width,
-          grayscaleCanvas.height,
+          canvas.width,
+          canvas.height,
         );
-        const grayscaleData = grayscaleContext.getImageData(
-          0,
-          0,
-          grayscaleCanvas.width,
-          grayscaleCanvas.height,
+        const coloredRows = Array.from(
+          { length: canvas.height },
+          (_, y) => {
+            let colored = 0;
+            let green = 0;
+            let sampled = 0;
+            const step = Math.max(1, Math.floor(canvas.width / 180));
+            for (let x = 0; x < canvas.width; x += step) {
+              const offset = (y * canvas.width + x) * 4;
+              const red = imageData.data[offset];
+              const channelGreen = imageData.data[offset + 1];
+              const blue = imageData.data[offset + 2];
+              const maximum = Math.max(red, channelGreen, blue);
+              const minimum = Math.min(red, channelGreen, blue);
+              if (maximum - minimum > 38 && maximum > 95) colored += 1;
+              if (
+                channelGreen > 105 &&
+                channelGreen > red * 1.35 &&
+                channelGreen > blue * 1.18
+              ) {
+                green += 1;
+              }
+              sampled += 1;
+            }
+            return {
+              colored: colored / Math.max(1, sampled) > 0.16,
+              green: green / Math.max(1, sampled) > 0.16,
+            };
+          },
         );
-        for (let index = 0; index < grayscaleData.data.length; index += 4) {
-          const grayscale = Math.round(
-            grayscaleData.data[index] * 0.2126 +
-              grayscaleData.data[index + 1] * 0.7152 +
-              grayscaleData.data[index + 2] * 0.0722,
-          );
-          grayscaleData.data[index] = grayscale;
-          grayscaleData.data[index + 1] = grayscale;
-          grayscaleData.data[index + 2] = grayscale;
-        }
-        grayscaleContext.putImageData(grayscaleData, 0, 0);
-
-        const contrastCanvas = document.createElement("canvas");
-        contrastCanvas.width = grayscaleCanvas.width;
-        contrastCanvas.height = grayscaleCanvas.height;
-        const contrastContext = contrastCanvas.getContext("2d");
-        if (contrastContext) {
-          const contrastData = new ImageData(
-            new Uint8ClampedArray(grayscaleData.data),
-            grayscaleData.width,
-            grayscaleData.height,
-          );
-          for (let index = 0; index < contrastData.data.length; index += 4) {
-            const highContrast = contrastData.data[index] >= 170 ? 255 : 0;
-            contrastData.data[index] = highContrast;
-            contrastData.data[index + 1] = highContrast;
-            contrastData.data[index + 2] = highContrast;
+        let greenStart = -1;
+        coloredRows.forEach((row, y) => {
+          if (row.green && greenStart < 0) greenStart = y;
+          if ((!row.green || y === coloredRows.length - 1) && greenStart >= 0) {
+            const bottom = row.green ? y + 1 : y;
+            if (bottom - greenStart >= 4) {
+              greenBands.push({ top: greenStart, bottom });
+            }
+            greenStart = -1;
           }
-          contrastContext.putImageData(contrastData, 0, 0);
-          images = [grayscaleCanvas, contrastCanvas];
-        } else {
-          images = [grayscaleCanvas];
+        });
+        if (pageSegmentationMode !== "4") {
+          for (let index = 0; index < imageData.data.length; index += 4) {
+            const pixelIndex = index / 4;
+            const y = Math.floor(pixelIndex / canvas.width);
+            const red = imageData.data[index];
+            const channelGreen = imageData.data[index + 1];
+            const blue = imageData.data[index + 2];
+            const maximum = Math.max(red, channelGreen, blue);
+            const minimum = Math.min(red, channelGreen, blue);
+            const luminance =
+              red * 0.2126 + channelGreen * 0.7152 + blue * 0.0722;
+            const inColoredRow = coloredRows[y]?.colored;
+            const isColoredBackground =
+              maximum - minimum > 38 && maximum > 95;
+            const isWhiteText =
+              inColoredRow && minimum > 215 && maximum - minimum < 25;
+            const highContrast = isWhiteText
+              ? 0
+              : isColoredBackground
+                ? 255
+                : luminance >= 170
+                  ? 255
+                  : 0;
+            imageData.data[index] = highContrast;
+            imageData.data[index + 1] = highContrast;
+            imageData.data[index + 2] = highContrast;
+          }
+          context.putImageData(imageData, 0, 0);
         }
+        image = canvas;
       }
       bitmap.close();
     } catch {
-      images = [file];
+      image = file;
     }
   }
 
   try {
-    const results = [];
-    for (const image of images) {
-      results.push(
-        await worker.recognize(image, {}, { text: true, tsv: true }),
-      );
-    }
-    const primaryTableResult = results.at(-1)!;
+    const result = await worker.recognize(
+      image,
+      {},
+      { text: true, tsv: true },
+    );
     return {
-      text: results.map((result) => result.data.text).join("\n"),
-      tsv: primaryTableResult.data.tsv ?? "",
+      text: result.data.text,
+      tsv: result.data.tsv ?? "",
+      greenBands,
     };
   } finally {
     await worker.terminate();
@@ -5997,60 +6346,63 @@ type ShortageOcrField =
   | "kspNumber"
   | "quantity"
   | "pnNumber"
-  | "dueDate"
-  | "comments";
+  | "dueDate";
 
-function parseShortageRowsFromTsv(tsv: string) {
+function parseShortageRowsFromTsv(
+  tsv: string,
+  greenBands: Array<{ top: number; bottom: number }> = [],
+) {
   const words = wordsFromTsv(tsv);
-  const kspHeader = words.find((word) =>
-    normalizeHeading(word.text).startsWith("ksp"),
+  const findSignal = (test: (normalized: string) => boolean) =>
+    words.find((word) => test(normalizeHeading(word.text)));
+  const kspHeader = findSignal(
+    (value) =>
+      value === "ks" ||
+      value === "ksp" ||
+      value === "kspart" ||
+      value === "kspartno" ||
+      value === "kspnumber",
   );
-  if (!kspHeader) return [] as ShortageItem[];
+  const pnHeader = findSignal(
+    (value) => value === "manufacturer" || value === "manufacturerpartno",
+  );
+  const quantityHeader = findSignal(
+    (value) =>
+      value === "shortage" ||
+      value === "shortageqty" ||
+      value === "qty" ||
+      value === "quantity",
+  );
+  const dueHeader = findSignal(
+    (value) => value === "due" || value === "duedate",
+  );
+  if (!kspHeader || !pnHeader || !quantityHeader || !dueHeader) {
+    return [] as ShortageItem[];
+  }
 
-  const headerWords = words.filter(
-    (word) =>
-      Math.abs(word.top - kspHeader.top) <=
-      Math.min(12, Math.max(8, kspHeader.height * 0.55)),
-  );
-  const findHeader = (test: (normalized: string) => boolean) =>
-    headerWords.find((word) => test(normalizeHeading(word.text)));
   const anchors = [
     { field: "kspNumber" as const, word: kspHeader },
     {
-      field: "quantity" as const,
-      word: findHeader((value) => value === "qty" || value === "quantity"),
+      field: "pnNumber" as const,
+      word: pnHeader,
     },
     {
-      field: "pnNumber" as const,
-      word: findHeader(
-        (value) => value === "pn" || value === "pnnumber" || value === "partnumber",
-      ),
+      field: "quantity" as const,
+      word: quantityHeader,
     },
     {
       field: "dueDate" as const,
-      word: findHeader((value) => value === "due" || value === "duedate"),
-    },
-    {
-      field: "comments" as const,
-      word: findHeader(
-        (value) => value === "additional" || value.startsWith("comment"),
-      ),
+      word: dueHeader,
     },
   ]
-    .filter(
-      (anchor): anchor is { field: ShortageOcrField; word: OcrWord } =>
-        Boolean(anchor.word),
-    )
     .map((anchor) => ({
       ...anchor,
       center: anchor.word.left + anchor.word.width / 2,
     }))
     .sort((a, b) => a.center - b.center);
 
-  if (anchors.length < 3) return [] as ShortageItem[];
-
   const headerBottom = Math.max(
-    ...headerWords.map((word) => word.top + word.height),
+    ...anchors.map((anchor) => anchor.word.top + anchor.word.height),
   );
   const dataWords = words
     .filter((word) => word.top + word.height / 2 > headerBottom + 1)
@@ -6072,6 +6424,18 @@ function parseShortageRowsFromTsv(tsv: string) {
 
   return groupedRows
     .map((row) => {
+      const rowCenter =
+        row.reduce(
+          (sum, item) => sum + item.top + item.height / 2,
+          0,
+        ) / row.length;
+      if (
+        greenBands.some(
+          (band) => rowCenter >= band.top && rowCenter <= band.bottom,
+        )
+      ) {
+        return null;
+      }
       const cells = new Map<ShortageOcrField, OcrWord[]>(
         anchors.map((anchor) => [anchor.field, []]),
       );
@@ -6091,36 +6455,46 @@ function parseShortageRowsFromTsv(tsv: string) {
           .join(" ")
           .trim();
       const dueValue = value("dueDate");
-      const comments = value("comments");
       const customerSupplied = /customer\s*supplied/i.test(
-        `${dueValue} ${comments}`,
+        dueValue,
       );
+      const kspNumber = value("kspNumber");
+      const pnNumber = value("pnNumber");
+      const quantity =
+        value("quantity").match(/\d+(?:\.\d+)?/)?.[0] ?? "";
+      if (
+        /\bpcb\b/i.test(dueValue) ||
+        /^\s*pcb(?:\b|[-_])/i.test(pnNumber) ||
+        /^\s*pcb\b/i.test(kspNumber)
+      ) {
+        return null;
+      }
       return {
         id: makeId("shortage"),
-        kspNumber: value("kspNumber"),
-        pnNumber: value("pnNumber"),
-        quantity: value("quantity"),
+        kspNumber,
+        pnNumber,
+        quantity,
         dueDate: customerSupplied ? "" : normalizeUploadedDate(dueValue),
-        comments,
+        comments: "",
         customerSupplied,
         complete: false,
       };
     })
+    .filter((item): item is ShortageItem => Boolean(item))
     .filter(
       (item) =>
         item.kspNumber ||
         item.pnNumber ||
         item.quantity ||
         item.dueDate ||
-        item.customerSupplied ||
-        item.comments,
+        item.customerSupplied,
     );
 }
 
 async function parseShortageFile(file: File): Promise<ShortageItem[]> {
   if (file.type.startsWith("image/")) {
-    const { text, tsv } = await recognizeScreenshotData(file, "3");
-    const tableRows = parseShortageRowsFromTsv(tsv);
+    const { text, tsv, greenBands } = await recognizeScreenshotData(file, "4");
+    const tableRows = parseShortageRowsFromTsv(tsv, greenBands);
     if (tableRows.length) return tableRows;
     return text
       .split(/\r?\n/)
@@ -6153,11 +6527,7 @@ async function parseShortageFile(file: File): Promise<ShortageItem[]> {
           quantity:
             columns[2] ?? (quantityIndex > 1 ? fallback[quantityIndex] : ""),
           dueDate,
-          comments:
-            columns.slice(3).join(" ") ||
-            (quantityIndex > 1
-              ? fallback.slice(quantityIndex + 1).join(" ")
-              : ""),
+          comments: "",
           customerSupplied: /customer\s*supplied/i.test(line),
           complete: false,
         };
@@ -6184,24 +6554,43 @@ async function parseShortageFile(file: File): Promise<ShortageItem[]> {
           value,
         ]),
       );
+      const dueValue = String(normalized.duedate || "");
+      const pnNumber = String(
+        normalized.manufacturerpartno ||
+          normalized.pn ||
+          normalized.pnnumber ||
+          normalized.partnumber ||
+          "",
+      );
+      if (
+        /\bpcb\b/i.test(dueValue) ||
+        /^\s*pcb(?:\b|[-_])/i.test(pnNumber)
+      ) {
+        return null;
+      }
+      const customerSupplied = /customer\s*supplied/i.test(dueValue);
       return {
         id: makeId("shortage"),
-        kspNumber: String(normalized.ksp || normalized.kspnumber || ""),
-        pnNumber: String(
-          normalized.pn || normalized.pnnumber || normalized.partnumber || "",
-        ),
-        quantity: String(normalized.qty || normalized.quantity || ""),
-        dueDate: normalizeUploadedDate(normalized.duedate),
-        comments: String(
-          normalized.additionalcomments ||
-            normalized.comments ||
-            normalized.notes ||
+        kspNumber: String(
+          normalized.kspartno ||
+            normalized.ksp ||
+            normalized.kspnumber ||
             "",
         ),
-        customerSupplied: /customer\s*supplied/i.test(String(normalized.duedate || "")),
+        pnNumber,
+        quantity: String(
+          normalized.shortageqty ||
+            normalized.qty ||
+            normalized.quantity ||
+            "",
+        ),
+        dueDate: customerSupplied ? "" : normalizeUploadedDate(dueValue),
+        comments: "",
+        customerSupplied,
         complete: false,
       };
     })
+    .filter((item): item is ShortageItem => Boolean(item))
     .filter(
       (item) =>
         item.kspNumber || item.pnNumber || item.quantity || item.dueDate,
@@ -6395,7 +6784,7 @@ function OldDataImportModal({
       <section className="modal-card legacy-import-modal" role="dialog" aria-modal="true">
         <div className="modal-header">
           <div>
-            <p className="section-kicker">Data & Backup · Special booking</p>
+            <p className="section-kicker">Settings · Special booking</p>
             <h2>OLD DATA Production Booking</h2>
             <p>
               Import every row, review missing information, and confirm each job
@@ -6685,17 +7074,16 @@ function NewJobModal({
   const [mechanicalLevel, setMechanicalLevel] = useState<"CCA" | "LRU">("CCA");
   const [mechanicalRecipeId, setMechanicalRecipeId] = useState("");
   const [linkedJobIds, setLinkedJobIds] = useState<string[]>([]);
-  const customerFolders = useMemo(() => {
-    const folders = new Map<string, string>();
-    jobs.forEach((job) => {
-      const folder = job.customer.trim();
-      const key = folder.toLocaleLowerCase();
-      if (folder && !folders.has(key)) folders.set(key, folder);
-    });
-    return [...folders.values()].sort((left, right) =>
-      left.localeCompare(right, undefined, { sensitivity: "base" }),
-    );
-  }, [jobs]);
+  const customerSuggestions = useMemo(
+    () =>
+      [...new Set(
+        jobs
+          .filter((job) => job.division === division)
+          .map((job) => job.customer.trim())
+          .filter(Boolean),
+      )].sort((a, b) => a.localeCompare(b)),
+    [jobs, division],
+  );
 
   const eligibleLinkedJobs = jobs.filter(
     (job) =>
@@ -6738,34 +7126,39 @@ function NewJobModal({
       otherProcess?: boolean;
     },
   ) {
-    const importedFields = {
+    const parsedWithDefaults = {
       ...parsed,
       status: parsed.status || "Waiting on Parts",
       createdDate: parsed.createdDate || chicagoDateKey(),
-    };
+    } satisfies typeof parsed;
     const required = [...requiredDraftFields];
-    if (parsed.polymerics) required.push("polymericsTurnDays");
-    if (parsed.externalTesting) required.push("externalTestingTurnDays");
-    if (parsed.otherProcess)
+    if (parsedWithDefaults.polymerics) required.push("polymericsTurnDays");
+    if (parsedWithDefaults.externalTesting) required.push("externalTestingTurnDays");
+    if (parsedWithDefaults.otherProcess)
       required.push("otherSpecialProcess", "otherSpecialProcessTurnDays");
     setMissingFields(
       new Set(
-        required.filter((key) => !String(importedFields[key] ?? "").trim()),
+        required.filter(
+          (key) => !String(parsedWithDefaults[key] ?? "").trim(),
+        ),
       ),
     );
-    setDivisionMissing(!parsed.division);
-    if (parsed.division) setDivision(parsed.division);
-    if (parsed.polymerics !== undefined) setPolymerics(parsed.polymerics);
-    if (parsed.externalTesting !== undefined)
-      setExternalTesting(parsed.externalTesting);
-    if (parsed.faiReport !== undefined) setFaiReport(parsed.faiReport);
-    if (parsed.otherProcess !== undefined) setOtherProcess(parsed.otherProcess);
+    setDivisionMissing(!parsedWithDefaults.division);
+    if (parsedWithDefaults.division) setDivision(parsedWithDefaults.division);
+    if (parsedWithDefaults.polymerics !== undefined)
+      setPolymerics(parsedWithDefaults.polymerics);
+    if (parsedWithDefaults.externalTesting !== undefined)
+      setExternalTesting(parsedWithDefaults.externalTesting);
+    if (parsedWithDefaults.faiReport !== undefined)
+      setFaiReport(parsedWithDefaults.faiReport);
+    if (parsedWithDefaults.otherProcess !== undefined)
+      setOtherProcess(parsedWithDefaults.otherProcess);
     setFields(
       (current) =>
         ({
           ...current,
           ...Object.fromEntries(
-            Object.entries(importedFields).filter(
+            Object.entries(parsedWithDefaults).filter(
               ([key]) =>
                 ![
                   "division",
@@ -6863,7 +7256,6 @@ function NewJobModal({
           quantity:
             extractOcrValue(text, ["QTY", "Quantity"]) ||
             labeled.quantity ||
-            parseBookingQuantityFromTsv(result.tsv) ||
             tableRow.quantity,
           projectType:
             projectTypes.find(
@@ -7496,19 +7888,16 @@ function NewJobModal({
           <label className={`wide ${fieldClass("customer")}`}>
             Customer Sub-Category / Folder {missingMark("customer")}
             <input
-              list="new-project-customer-folders"
+              list={`customer-folder-options-${division.toLowerCase()}`}
               value={fields.customer}
               onChange={(event) => setField("customer", event.target.value)}
-              placeholder="Search an existing folder or enter a new customer"
+              placeholder="Search an existing folder or type a new customer"
             />
-            <datalist id="new-project-customer-folders">
-              {customerFolders.map((folder) => (
-                <option key={folder} value={folder} />
+            <datalist id={`customer-folder-options-${division.toLowerCase()}`}>
+              {customerSuggestions.map((customer) => (
+                <option key={customer} value={customer} />
               ))}
             </datalist>
-            <small>
-              Select an existing customer folder or type a new name to create one.
-            </small>
           </label>
           <label className={fieldClass("jobNumber")}>
             {mechanicalBuild ? "MECH JOB #" : "Job #"} {missingMark("jobNumber")}
@@ -9630,8 +10019,9 @@ function JobDrawer({
             </div>
             <p className="muted shortage-header-help">
               Each spreadsheet or screenshot row becomes one shortage item.
-              Column order can vary when the headers include KSP#, PN, QTY, Due
-              Date, and Additional Comments.
+              Recognized headers are KS Part No., Manufacturer Part No.,
+              Shortage QTY, and Due Date. PCB and green received rows are
+              skipped.
             </p>
             <input
               ref={shortageUploadRef}
