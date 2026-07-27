@@ -294,9 +294,6 @@ const rfqTags: RFQTag[] = [
 const storageKey = "projectflow-manufacturing-v3";
 const quotesStorageKey = "krypton-oor-quotes-v1";
 const weeklyActionsStorageKey = "krypton-oor-weekly-actions-v1";
-const rfqShortcutStorageKey = "krypton-oor-rfq-shortcuts-v1";
-
-type RfqShortcutSettings = Record<Division, string>;
 
 type DesktopBridgeWindow = Window & {
   __TAURI_INTERNALS__?: {
@@ -1465,11 +1462,6 @@ export default function Home() {
     archives: [],
   }));
   const [weeklyActionsHydrated, setWeeklyActionsHydrated] = useState(false);
-  const [rfqShortcuts, setRfqShortcuts] = useState<RfqShortcutSettings>({
-    Commercial: "",
-    Aerospace: "",
-  });
-  const [rfqShortcutsHydrated, setRfqShortcutsHydrated] = useState(false);
   const [assemblyRecipes, setAssemblyRecipes] = useState<AssemblyRecipe[]>([]);
   const [assemblyRecipesHydrated, setAssemblyRecipesHydrated] = useState(false);
 
@@ -1490,30 +1482,6 @@ export default function Home() {
       const jobId = params.get("job");
       if (jobId) setSelectedJobId(jobId);
       if (params.get("new") === "1") setShowNewJob(true);
-    });
-    return () => cancelAnimationFrame(frame);
-  }, []);
-
-  useEffect(() => {
-    let restored: RfqShortcutSettings = {
-      Commercial: "",
-      Aerospace: "",
-    };
-    try {
-      const raw = window.localStorage.getItem(rfqShortcutStorageKey);
-      if (raw) {
-        const saved = JSON.parse(raw) as Partial<RfqShortcutSettings>;
-        restored = {
-          Commercial: saved.Commercial ?? "",
-          Aerospace: saved.Aerospace ?? "",
-        };
-      }
-    } catch {
-      window.localStorage.removeItem(rfqShortcutStorageKey);
-    }
-    const frame = requestAnimationFrame(() => {
-      setRfqShortcuts(restored);
-      setRfqShortcutsHydrated(true);
     });
     return () => cancelAnimationFrame(frame);
   }, []);
@@ -1627,13 +1595,6 @@ export default function Home() {
     }
   }, [weeklyActions, weeklyActionsHydrated]);
 
-  useEffect(() => {
-    if (!rfqShortcutsHydrated) return;
-    window.localStorage.setItem(
-      rfqShortcutStorageKey,
-      JSON.stringify(rfqShortcuts),
-    );
-  }, [rfqShortcuts, rfqShortcutsHydrated]);
   useEffect(() => {
     if (assemblyRecipesHydrated) {
       window.localStorage.setItem(
@@ -1798,46 +1759,31 @@ export default function Home() {
     );
   }
 
-  async function assignRfqShortcut(division: Division) {
-    const request = desktopInvoke<string | null>("pick_rfq_shortcut", {
+  async function createRfqFolder(division: Division) {
+    const bridge = (window as DesktopBridgeWindow).__TAURI_INTERNALS__;
+    if (!bridge?.invoke) {
+      notify("RFQ folders can only be created from the installed Windows app.");
+      return;
+    }
+    const baseFolder =
+      division === "Commercial" ? "Q:\\Customer RFQs" : "P:\\RFQs";
+    const folderName = window.prompt(
+      `Enter the new ${division} RFQ folder name.\n\nIt will be created under:\n${baseFolder}`,
+    )?.trim();
+    if (!folderName) return;
+    const request = desktopInvoke<string>("create_rfq_folder", {
       division,
+      folderName,
     });
-    if (!request) {
-      notify("RFQ folder shortcuts can be assigned in the Windows app.");
-      return;
-    }
+    if (!request) return;
     try {
-      const selected = await request;
-      if (!selected) return;
-      setRfqShortcuts((current) => ({ ...current, [division]: selected }));
-      notify(`${division} RFQ shortcut assigned.`);
-    } catch {
-      notify("The shortcut could not be selected.");
-    }
-  }
-
-  async function runRfqShortcut(division: Division) {
-    const shortcutPath = rfqShortcuts[division];
-    if (!shortcutPath) {
+      const createdPath = await request;
+      notify(`${division} RFQ folder created and opened: ${createdPath}`);
+    } catch (error) {
       notify(
-        `Assign the ${division} RFQ shortcut in Settings before using this button.`,
-      );
-      return;
-    }
-    const request = desktopInvoke<void>("run_rfq_shortcut", {
-      division,
-      shortcutPath,
-    });
-    if (!request) {
-      notify("RFQ folder shortcuts can only run from the Windows app.");
-      return;
-    }
-    try {
-      await request;
-      notify(`${division} RFQ folder task started.`);
-    } catch {
-      notify(
-        `The ${division} shortcut could not be opened. Reassign it in Settings.`,
+        typeof error === "string"
+          ? error
+          : `The ${division} RFQ folder could not be created.`,
       );
     }
   }
@@ -2254,7 +2200,7 @@ export default function Home() {
             onNew={() => setShowNewRfq(true)}
             onOpen={openQuoteWindow}
             onComplete={(id, completed) => updateQuote(id, { completed })}
-            onRunShortcut={runRfqShortcut}
+            onCreateFolder={createRfqFolder}
           />
         )}
         {activeView === "configurations" && (
@@ -2282,8 +2228,6 @@ export default function Home() {
             onImportBackup={importCompleteBackup}
             onOpenOldData={() => setShowOldDataImport(true)}
             weeklyArchives={weeklyActions.archives}
-            rfqShortcuts={rfqShortcuts}
-            onAssignRfqShortcut={assignRfqShortcut}
           />
         )}
       </main>
@@ -2731,13 +2675,13 @@ function QuotesView({
   onNew,
   onOpen,
   onComplete,
-  onRunShortcut,
+  onCreateFolder,
 }: {
   quotes: QuoteRecord[];
   onNew: () => void;
   onOpen: (id: string) => void;
   onComplete: (id: string, completed: boolean) => void;
-  onRunShortcut: (division: Division) => void;
+  onCreateFolder: (division: Division) => void;
 }) {
   function customerGroups(division: Division, completed = false) {
     return Object.entries(
@@ -2812,13 +2756,15 @@ function QuotesView({
         <div className="quotes-header-actions">
           <button
             className="button secondary"
-            onClick={() => onRunShortcut("Commercial")}
+            onClick={() => onCreateFolder("Commercial")}
+            title="Create under Q:\Customer RFQs"
           >
             <Folder size={17} /> Create RFQ Folder for Commercial
           </button>
           <button
             className="button secondary"
-            onClick={() => onRunShortcut("Aerospace")}
+            onClick={() => onCreateFolder("Aerospace")}
+            title="Create under P:\RFQs"
           >
             <Folder size={17} /> Create RFQ Folder for Aerospace
           </button>
@@ -4814,16 +4760,12 @@ function IntegrationsView({
   onImportBackup,
   onOpenOldData,
   weeklyArchives,
-  rfqShortcuts,
-  onAssignRfqShortcut,
 }: {
   onExport: () => void;
   onExportBackup: () => void;
   onImportBackup: (event: ChangeEvent<HTMLInputElement>) => void;
   onOpenOldData: () => void;
   weeklyArchives: WeeklyWorkWeek[];
-  rfqShortcuts: RfqShortcutSettings;
-  onAssignRfqShortcut: (division: Division) => void;
 }) {
   return (
     <section className="view-stack">
@@ -4831,45 +4773,11 @@ function IntegrationsView({
         <div>
           <h2>Settings</h2>
           <p>
-            Manage local backups, data imports, weekly history, and Windows RFQ
-            folder shortcuts.
+            Manage local backups, data imports, and weekly history.
           </p>
         </div>
       </div>
       <div className="integration-grid">
-        <article className="panel integration-card rfq-shortcut-card">
-          <span className="integration-icon shortcut">
-            <FolderKanban />
-          </span>
-          <div>
-            <small>Windows application</small>
-            <h3>Assign RFQ Folder Task</h3>
-            <p>
-              Choose the Commercial and Aerospace desktop shortcuts that the
-              Quotes menu should run.
-            </p>
-          </div>
-          <div className="rfq-shortcut-settings">
-            {(["Commercial", "Aerospace"] as Division[]).map((division) => (
-              <div key={division}>
-                <span>
-                  <strong>{division} RFQ Shortcut</strong>
-                  <small title={rfqShortcuts[division]}>
-                    {rfqShortcuts[division]
-                      ? rfqShortcuts[division].split(/[\\/]/).at(-1)
-                      : "Not assigned"}
-                  </small>
-                </span>
-                <button
-                  className="button secondary small"
-                  onClick={() => onAssignRfqShortcut(division)}
-                >
-                  <Folder size={15} /> Choose shortcut
-                </button>
-              </div>
-            ))}
-          </div>
-        </article>
         <article className="panel integration-card complete-backup-card">
           <span className="integration-icon excel">
             <FileSpreadsheet />

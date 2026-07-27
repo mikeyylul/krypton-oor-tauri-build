@@ -1,7 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{
-    path::{Path, PathBuf},
+    fs,
+    path::PathBuf,
     process::Command,
 };
 use tauri::{
@@ -9,70 +10,88 @@ use tauri::{
     webview::{NewWindowResponse, WebviewWindowBuilder},
 };
 
-const RFQ_SHORTCUT_EXTENSIONS: [&str; 4] = ["lnk", "exe", "cmd", "bat"];
-
-fn validate_rfq_shortcut(path: &Path) -> Result<(), String> {
-    if !path.is_file() {
-        return Err("The assigned RFQ shortcut no longer exists.".to_string());
+fn validate_folder_name(folder_name: &str) -> Result<&str, String> {
+    let trimmed = folder_name.trim();
+    if trimmed.is_empty() {
+        return Err("Enter a folder name.".to_string());
     }
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(str::to_ascii_lowercase)
-        .ok_or_else(|| "Select a Windows shortcut or executable file.".to_string())?;
-    if !RFQ_SHORTCUT_EXTENSIONS.contains(&extension.as_str()) {
-        return Err("Select a .lnk, .exe, .cmd, or .bat file.".to_string());
+    if trimmed == "." || trimmed == ".." {
+        return Err("Enter a valid folder name.".to_string());
     }
-    Ok(())
+    if trimmed
+        .chars()
+        .any(|character| matches!(character, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'))
+        || trimmed.ends_with(' ')
+        || trimmed.ends_with('.')
+    {
+        return Err("The folder name contains characters Windows does not allow.".to_string());
+    }
+    let reserved = trimmed
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    if matches!(
+        reserved.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL"
+            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
+            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+    ) {
+        return Err("That folder name is reserved by Windows.".to_string());
+    }
+    Ok(trimmed)
 }
 
 #[tauri::command]
-fn pick_rfq_shortcut(division: String) -> Result<Option<String>, String> {
-    let title = format!("Assign {division} RFQ Folder Task");
-    let script = r#"
-Add-Type -AssemblyName System.Windows.Forms
-$dialog = New-Object System.Windows.Forms.OpenFileDialog
-$dialog.Title = [string]$args[0]
-$dialog.Filter = 'Windows shortcuts and tasks (*.lnk;*.exe;*.cmd;*.bat)|*.lnk;*.exe;*.cmd;*.bat'
-$dialog.CheckFileExists = $true
-$dialog.Multiselect = $false
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-    [Console]::Out.Write($dialog.FileName)
-}
-"#;
-    let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-Sta", "-Command", script, &title])
-        .output()
-        .map_err(|error| format!("Could not open the Windows shortcut picker: {error}"))?;
-    if !output.status.success() {
-        return Err("The Windows shortcut picker could not be opened.".to_string());
+fn create_rfq_folder(division: String, folder_name: String) -> Result<String, String> {
+    let root = match division.as_str() {
+        "Commercial" => PathBuf::from(r"Q:\Customer RFQs"),
+        "Aerospace" => PathBuf::from(r"P:\RFQs"),
+        _ => return Err("Choose Commercial or Aerospace.".to_string()),
+    };
+    if !root.is_dir() {
+        return Err(format!(
+            "The {division} RFQ location is not available: {}. Connect the network drive and try again.",
+            root.display()
+        ));
     }
-    let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if selected.is_empty() {
-        return Ok(None);
+    let folder_name = validate_folder_name(&folder_name)?;
+    let main_folder = root.join(folder_name);
+    if main_folder.exists() {
+        return Err(format!(
+            "That folder already exists: {}",
+            main_folder.display()
+        ));
     }
-    let path = PathBuf::from(&selected);
-    validate_rfq_shortcut(&path)?;
-    Ok(Some(selected))
-}
-
-#[tauri::command]
-fn run_rfq_shortcut(shortcut_path: String, division: String) -> Result<(), String> {
-    let path = PathBuf::from(shortcut_path);
-    validate_rfq_shortcut(&path)?;
+    fs::create_dir(&main_folder).map_err(|error| {
+        format!(
+            "Could not create the {division} RFQ folder at {}: {error}",
+            main_folder.display()
+        )
+    })?;
+    for child in ["Customer Data", "Customer Request"] {
+        if let Err(error) = fs::create_dir(main_folder.join(child)) {
+            let _ = fs::remove_dir_all(&main_folder);
+            return Err(format!(
+                "Could not create the required {child} folder: {error}"
+            ));
+        }
+    }
     Command::new("explorer.exe")
-        .arg(path)
+        .arg(&main_folder)
         .spawn()
-        .map_err(|error| format!("Could not run the assigned {division} RFQ shortcut: {error}"))?;
-    Ok(())
+        .map_err(|error| {
+            format!(
+                "The folder was created at {}, but Windows Explorer could not open it: {error}",
+                main_folder.display()
+            )
+        })?;
+    Ok(main_folder.to_string_lossy().into_owned())
 }
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![
-            pick_rfq_shortcut,
-            run_rfq_shortcut
-        ])
+        .invoke_handler(tauri::generate_handler![create_rfq_folder])
         .setup(|app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Krypton Solutions OOR")

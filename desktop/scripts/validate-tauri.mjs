@@ -56,7 +56,27 @@ if (!String(config.app?.security?.csp).includes("connect-src 'self'")) {
 if (!rustSource.includes("on_navigation") || !rustSource.includes("NewWindowResponse::Deny")) {
   throw new Error("The Tauri application is missing external navigation blocking.");
 }
+for (const fragment of [
+  "fn create_rfq_folder",
+  'PathBuf::from(r"Q:\\Customer RFQs")',
+  'PathBuf::from(r"P:\\RFQs")',
+  '["Customer Data", "Customer Request"]',
+  'Command::new("explorer.exe")',
+]) {
+  if (!rustSource.includes(fragment)) {
+    throw new Error(`Missing native RFQ folder creation behavior: ${fragment}`);
+  }
+}
+for (const obsolete of [
+  "pick_rfq_shortcut",
+  "run_rfq_shortcut",
+  "Assign RFQ Folder Task",
+]) {
+  if (rustSource.includes(obsolete) || desktopSource.includes(obsolete)) {
+    throw new Error(`Obsolete RFQ shortcut behavior remains: ${obsolete}`);
+  }
+}
 
 console.log(
-  "Validated website parity, local autosave identity, packaged photo OCR, and Tauri offline restrictions.",
+  "Validated website parity, native RFQ folder creation, local autosave identity, packaged photo OCR, and Tauri offline restrictions.",
 );

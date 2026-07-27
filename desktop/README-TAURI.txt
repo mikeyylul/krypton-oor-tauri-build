@@ -15,10 +15,11 @@ LOCAL AND OFFLINE DATA
 - The application has no automatic online updater.
 - The installer includes the WebView2 runtime needed for offline installation.
 
-RFQ FOLDER SHORTCUTS
-- In Settings, assign separate Commercial and Aerospace Windows shortcut files.
-- In Quotes, use the matching Create RFQ Folder button to run the assigned local shortcut.
-- Shortcut paths stay only in this application's local storage.
+RFQ FOLDER CREATION
+- In Quotes, use Create RFQ Folder for Commercial to create under Q:\Customer RFQs.
+- Use Create RFQ Folder for Aerospace to create under P:\RFQs.
+- Each new RFQ folder contains Customer Data and Customer Request subfolders.
+- The new folder opens automatically in Windows Explorer.
 
 PHOTO SCANNING
 - OCR worker, engine, and English recognition data are included inside the application.

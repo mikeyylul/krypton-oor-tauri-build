@@ -7015,7 +7015,7 @@ button:disabled {
   }
 }
 
-/* RFQ archive, shortcut controls, action filters, and week navigation */
+/* RFQ archive, action filters, and week navigation */
 .quotes-header-actions {
   align-items: center;
   display: flex;
@@ -7129,58 +7129,6 @@ button:disabled {
   width: auto;
 }
 
-.rfq-shortcut-card {
-  grid-column: 1 / -1;
-  min-height: 0;
-}
-
-.integration-icon.shortcut {
-  background: #e8efff;
-  color: var(--blue);
-}
-
-.rfq-shortcut-settings {
-  display: grid;
-  gap: 10px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin-top: 10px;
-}
-
-.rfq-shortcut-settings > div {
-  align-items: center;
-  background: #f7f9fc;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  display: flex;
-  gap: 12px;
-  justify-content: space-between;
-  padding: 12px;
-}
-
-.rfq-shortcut-settings > div > span {
-  min-width: 0;
-}
-
-.rfq-shortcut-settings strong,
-.rfq-shortcut-settings small {
-  display: block;
-}
-
-.rfq-shortcut-settings strong {
-  font-size: 11px;
-}
-
-.rfq-shortcut-settings small {
-  color: var(--muted);
-  font-size: 9px;
-  margin-top: 4px;
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  text-transform: none;
-  white-space: nowrap;
-}
-
 @media (max-width: 980px) {
   .quotes-intro {
     align-items: stretch;
@@ -7205,15 +7153,6 @@ button:disabled {
   .quotes-header-actions .button {
     justify-content: center;
     width: 100%;
-  }
-
-  .rfq-shortcut-settings {
-    grid-template-columns: 1fr;
-  }
-
-  .rfq-shortcut-settings > div {
-    align-items: stretch;
-    flex-direction: column;
   }
 
   .completed-rfq-table {
