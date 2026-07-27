@@ -57,13 +57,13 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 }
 
 #[tauri::command]
-fn run_rfq_shortcut(shortcut_path: String, _division: String) -> Result<(), String> {
+fn run_rfq_shortcut(shortcut_path: String, division: String) -> Result<(), String> {
     let path = PathBuf::from(shortcut_path);
     validate_rfq_shortcut(&path)?;
     Command::new("explorer.exe")
         .arg(path)
         .spawn()
-        .map_err(|error| format!("Could not run the assigned RFQ shortcut: {error}"))?;
+        .map_err(|error| format!("Could not run the assigned {division} RFQ shortcut: {error}"))?;
     Ok(())
 }
 
