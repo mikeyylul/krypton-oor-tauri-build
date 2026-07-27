@@ -10,6 +10,30 @@ use tauri::{
     webview::{NewWindowResponse, WebviewWindowBuilder},
 };
 
+fn rfq_root(division: &str) -> Result<PathBuf, String> {
+    match division {
+        "Commercial" => Ok(PathBuf::from(r"Q:\Customer RFQs")),
+        "Aerospace" => Ok(PathBuf::from(r"P:\RFQs")),
+        _ => Err("Choose Commercial or Aerospace.".to_string()),
+    }
+}
+
+fn available_rfq_root(division: &str) -> Result<PathBuf, String> {
+    let root = rfq_root(division)?;
+    if !root.is_dir() {
+        return Err(format!(
+            "The {division} RFQ location is not available: {}. Connect the network drive and try again.",
+            root.display()
+        ));
+    }
+    root.canonicalize().map_err(|error| {
+        format!(
+            "The {division} RFQ location could not be opened: {} ({error})",
+            root.display()
+        )
+    })
+}
+
 fn validate_folder_name(folder_name: &str) -> Result<&str, String> {
     let trimmed = folder_name.trim();
     if trimmed.is_empty() {
@@ -43,20 +67,48 @@ fn validate_folder_name(folder_name: &str) -> Result<&str, String> {
 }
 
 #[tauri::command]
-fn create_rfq_folder(division: String, folder_name: String) -> Result<String, String> {
-    let root = match division.as_str() {
-        "Commercial" => PathBuf::from(r"Q:\Customer RFQs"),
-        "Aerospace" => PathBuf::from(r"P:\RFQs"),
-        _ => return Err("Choose Commercial or Aerospace.".to_string()),
+fn select_rfq_customer_folder(division: String) -> Result<Option<String>, String> {
+    let root = available_rfq_root(&division)?;
+    let Some(selected) = rfd::FileDialog::new()
+        .set_title(format!("Select the {division} customer folder"))
+        .set_directory(&root)
+        .pick_folder()
+    else {
+        return Ok(None);
     };
-    if !root.is_dir() {
+    let selected = selected.canonicalize().map_err(|error| {
+        format!(
+            "The selected customer folder could not be opened: {} ({error})",
+            selected.display()
+        )
+    })?;
+    if selected == root || !selected.starts_with(&root) {
         return Err(format!(
-            "The {division} RFQ location is not available: {}. Connect the network drive and try again.",
+            "Select an existing customer folder inside {}.",
+            root.display()
+        ));
+    }
+    Ok(Some(selected.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+fn create_rfq_folder(
+    division: String,
+    customer_folder: String,
+    folder_name: String,
+) -> Result<String, String> {
+    let root = available_rfq_root(&division)?;
+    let customer_folder = PathBuf::from(customer_folder)
+        .canonicalize()
+        .map_err(|error| format!("The selected customer folder is unavailable: {error}"))?;
+    if customer_folder == root || !customer_folder.starts_with(&root) {
+        return Err(format!(
+            "Select an existing customer folder inside {}.",
             root.display()
         ));
     }
     let folder_name = validate_folder_name(&folder_name)?;
-    let main_folder = root.join(folder_name);
+    let main_folder = customer_folder.join(folder_name);
     if main_folder.exists() {
         return Err(format!(
             "That folder already exists: {}",
@@ -91,7 +143,10 @@ fn create_rfq_folder(division: String, folder_name: String) -> Result<String, St
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![create_rfq_folder])
+        .invoke_handler(tauri::generate_handler![
+            select_rfq_customer_folder,
+            create_rfq_folder
+        ])
         .setup(|app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Krypton Solutions OOR")

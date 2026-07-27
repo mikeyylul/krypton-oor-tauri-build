@@ -1765,14 +1765,30 @@ export default function Home() {
       notify("RFQ folders can only be created from the installed Windows app.");
       return;
     }
-    const baseFolder =
-      division === "Commercial" ? "Q:\\Customer RFQs" : "P:\\RFQs";
+    const selectionRequest = desktopInvoke<string | null>(
+      "select_rfq_customer_folder",
+      { division },
+    );
+    if (!selectionRequest) return;
+    let customerFolder: string | null;
+    try {
+      customerFolder = await selectionRequest;
+    } catch (error) {
+      notify(
+        typeof error === "string"
+          ? error
+          : `The ${division} customer folder could not be selected.`,
+      );
+      return;
+    }
+    if (!customerFolder) return;
     const folderName = window.prompt(
-      `Enter the new ${division} RFQ folder name.\n\nIt will be created under:\n${baseFolder}`,
+      `Enter the new ${division} RFQ folder name.\n\nIt will be created inside:\n${customerFolder}`,
     )?.trim();
     if (!folderName) return;
     const request = desktopInvoke<string>("create_rfq_folder", {
       division,
+      customerFolder,
       folderName,
     });
     if (!request) return;
@@ -2757,14 +2773,14 @@ function QuotesView({
           <button
             className="button secondary"
             onClick={() => onCreateFolder("Commercial")}
-            title="Create under Q:\Customer RFQs"
+            title="Select a customer folder inside Q:\Customer RFQs"
           >
             <Folder size={17} /> Create RFQ Folder for Commercial
           </button>
           <button
             className="button secondary"
             onClick={() => onCreateFolder("Aerospace")}
-            title="Create under P:\RFQs"
+            title="Select a customer folder inside P:\RFQs"
           >
             <Folder size={17} /> Create RFQ Folder for Aerospace
           </button>
