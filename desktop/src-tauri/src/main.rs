@@ -69,13 +69,42 @@ fn validate_folder_name(folder_name: &str) -> Result<&str, String> {
 #[tauri::command]
 fn select_rfq_customer_folder(division: String) -> Result<Option<String>, String> {
     let root = available_rfq_root(&division)?;
-    let Some(selected) = rfd::FileDialog::new()
-        .set_title(format!("Select the {division} customer folder"))
-        .set_directory(&root)
-        .pick_folder()
-    else {
+    let title = format!("Select the {division} customer folder");
+    let script = format!(
+        "$shell = New-Object -ComObject Shell.Application; \
+         $folder = $shell.BrowseForFolder(0, '{}', 0, '{}'); \
+         if ($null -ne $folder) {{ [Console]::Out.Write($folder.Self.Path) }}",
+        title.replace('\'', "''"),
+        root.to_string_lossy().replace('\'', "''"),
+    );
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-STA",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            &script,
+        ])
+        .output()
+        .map_err(|error| {
+            format!(
+                "The Windows customer-folder picker could not be opened: {error}"
+            )
+        })?;
+    if !output.status.success() {
+        let details = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if details.is_empty() {
+            "The Windows customer-folder picker closed unexpectedly.".to_string()
+        } else {
+            format!("The Windows customer-folder picker failed: {details}")
+        });
+    }
+    let selected_text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if selected_text.is_empty() {
         return Ok(None);
-    };
+    }
+    let selected = PathBuf::from(selected_text);
     let selected = selected.canonicalize().map_err(|error| {
         format!(
             "The selected customer folder could not be opened: {} ({error})",
