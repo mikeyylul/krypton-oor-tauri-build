@@ -57,6 +57,9 @@ if (!rustSource.includes("on_navigation") || !rustSource.includes("NewWindowResp
   throw new Error("The Tauri application is missing external navigation blocking.");
 }
 for (const fragment of [
+  "Shell.Application",
+  "BrowseForFolder",
+  "powershell.exe",
   "fn create_rfq_folder",
   'PathBuf::from(r"Q:\\Customer RFQs")',
   'PathBuf::from(r"P:\\RFQs")',
