@@ -80,6 +80,21 @@ for (const obsolete of [
   }
 }
 
+for (const fragment of [
+  "customerOrganizationFolders",
+  "assemblyRecipes",
+  "presetJobDrafts",
+  "deferredActionItems",
+  "Return to Main List",
+  "collapsible-follow-up-section",
+  "Weekly Follow-Up",
+  "3-Day Follow-Up",
+]) {
+  if (!desktopSource.includes(fragment)) {
+    throw new Error(`Missing Version 61 workflow behavior: ${fragment}`);
+  }
+}
+
 console.log(
-  "Validated website parity, native RFQ folder creation, local autosave identity, packaged photo OCR, and Tauri offline restrictions.",
+  "Validated Website Version 61 parity, native RFQ folder creation, local autosave identity, packaged photo OCR, and Tauri offline restrictions.",
 );

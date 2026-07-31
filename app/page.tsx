@@ -83,9 +83,12 @@ type PolymericsOption =
   | "Conformal Coating";
 
 type BuildLevel = "PCBA" | "CCA" | "LRU";
+type FollowUpCadence = "weekly" | "three-day";
 type AssemblyRequirement = {
   id: string;
   inputLevel: Exclude<BuildLevel, "LRU">;
+  ksid: string;
+  pnName: string;
   pn: string;
   rev: string;
   quantityPerAssembly: number | "";
@@ -94,10 +97,35 @@ type AssemblyRecipe = {
   id: string;
   name: string;
   outputLevel: Exclude<BuildLevel, "PCBA">;
+  outputKsid: string;
+  division: Division;
+  customer: string;
+  pnName: string;
   outputPn: string;
   outputRev: string;
+  contact: string;
+  assemblyTurnDays: number;
   requirements: AssemblyRequirement[];
   createdAt: string;
+};
+
+type CustomerOrganizationFolder = {
+  id: string;
+  division: Division;
+  name: string;
+  customers: string[];
+  collapsed: boolean;
+};
+
+type KsidProfile = {
+  ksid: string;
+  division: Division;
+  customer: string;
+  pnName: string;
+  pn: string;
+  rev: string;
+  contact: string;
+  lastUsed: string;
 };
 
 type DailyNote = { id: string; date: string; createdAt: string; text: string };
@@ -115,6 +143,7 @@ type QuoteRecord = {
   customer: string;
   tags: RFQTag[];
   contact: string;
+  pnName: string;
   pn: string;
   quantity: string;
   rev: string;
@@ -123,6 +152,9 @@ type QuoteRecord = {
   createdAt: string;
   completed: boolean;
   notes: DailyNote[];
+  followUpCadence?: FollowUpCadence | "";
+  actionDeferralMode?: FollowUpCadence | "";
+  actionDeferredUntil?: string;
 };
 type PartialDelivery = {
   id: string;
@@ -173,6 +205,7 @@ type Job = {
   status: JobStatus;
   buildLevel?: BuildLevel;
   familyId?: string;
+  projectFamilyName?: string;
   assemblyRecipeId?: string;
   assemblyRequirements?: AssemblyRequirement[];
   linkedJobIds?: string[];
@@ -201,6 +234,9 @@ type Job = {
   kryptonDockDateOverride?: string;
   shortages: ShortageItem[];
   notes: DailyNote[];
+  followUpCadence?: FollowUpCadence | "";
+  actionDeferralMode?: FollowUpCadence | "";
+  actionDeferredUntil?: string;
 };
 type ActionItem = {
   id: string;
@@ -313,6 +349,8 @@ function desktopInvoke<T>(
   return bridge.invoke<T>(command, args);
 }
 const assemblyRecipesStorageKey = "krypton-oor-assembly-recipes-v1";
+const customerOrganizationStorageKey =
+  "krypton-oor-customer-organization-folders-v1";
 
 function chicagoDateKey() {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -329,6 +367,17 @@ function chicagoDateKey() {
 
 function dateKey(value: Date) {
   return value.toISOString().slice(0, 10);
+}
+
+function nextMonday(from = chicagoDateKey()) {
+  const date = new Date(`${from}T12:00:00Z`);
+  const days = ((8 - date.getUTCDay()) % 7) || 7;
+  date.setUTCDate(date.getUTCDate() + days);
+  return dateKey(date);
+}
+
+function followUpDate(mode: FollowUpCadence, from = chicagoDateKey()) {
+  return mode === "weekly" ? nextMonday(from) : addCalendarDays(from, 3);
 }
 
 function nthWeekday(year: number, month: number, weekday: number, nth: number) {
@@ -933,17 +982,13 @@ function actionItemsForJobs(jobs: Job[]): ActionItem[] {
           );
       }
       if (buildLevel !== "PCBA") {
-        const familyJobs = jobs.filter(
-          (candidate) =>
-            (candidate.familyId ?? candidate.id) === (job.familyId ?? job.id),
-        );
-        const progress = assemblyRequirementProgress(job, familyJobs);
+        const progress = assemblyRequirementProgress(job, jobs);
         progress
           .filter((item) => !item.complete)
           .forEach((item) =>
             addIfSoon(
               `input-${item.requirement.id}`,
-              `Need ${item.required - item.available} more ${item.requirement.inputLevel} ${item.requirement.pn}`,
+              `Need ${item.shortage} more ${item.requirement.inputLevel} ${item.requirement.pn}`,
               job.dueDate,
             ),
           );
@@ -1064,10 +1109,13 @@ function normalizeJob(job: Job): Job {
     ...job,
     buildLevel: job.buildLevel ?? "PCBA",
     familyId: job.familyId ?? job.id,
+    projectFamilyName: job.projectFamilyName ?? "",
     assemblyRecipeId: job.assemblyRecipeId ?? "",
     assemblyRequirements: (job.assemblyRequirements ?? []).map((item) => ({
       ...item,
       inputLevel: item.inputLevel ?? "PCBA",
+      ksid: item.ksid ?? "",
+      pnName: item.pnName ?? "",
       rev: item.rev ?? "",
       quantityPerAssembly:
         item.quantityPerAssembly === "" ? "" : Math.max(1, Number(item.quantityPerAssembly) || 1),
@@ -1126,12 +1174,24 @@ function normalizeJob(job: Job): Job {
       customerSupplied: item.customerSupplied ?? false,
     })),
     notes: job.notes ?? [],
+    followUpCadence:
+      job.followUpCadence === "weekly" ||
+      job.followUpCadence === "three-day"
+        ? job.followUpCadence
+        : "",
+    actionDeferralMode:
+      job.actionDeferralMode === "weekly" ||
+      job.actionDeferralMode === "three-day"
+        ? job.actionDeferralMode
+        : "",
+    actionDeferredUntil: job.actionDeferredUntil ?? "",
   };
 }
 
 function normalizeQuote(quote: QuoteRecord): QuoteRecord {
   return {
     ...quote,
+    pnName: quote.pnName ?? "",
     quantity: quote.quantity ?? "",
     tags: Array.isArray(quote.tags) ? quote.tags : [],
     completed: quote.completed ?? false,
@@ -1143,17 +1203,100 @@ function normalizeAssemblyRecipe(recipe: AssemblyRecipe): AssemblyRecipe {
   return {
     ...recipe,
     outputLevel: recipe.outputLevel === "LRU" ? "LRU" : "CCA",
+    outputKsid: recipe.outputKsid ?? "",
+    division: recipe.division === "Aerospace" ? "Aerospace" : "Commercial",
+    customer: recipe.customer ?? "",
+    pnName: recipe.pnName ?? recipe.name ?? "",
     outputRev: recipe.outputRev ?? "",
+    contact: recipe.contact ?? "",
+    assemblyTurnDays: Math.max(0, Number(recipe.assemblyTurnDays) || 0),
     requirements: (recipe.requirements ?? []).map((requirement) => ({
       ...requirement,
       inputLevel:
-        recipe.outputLevel === "LRU" ? "CCA" : "PCBA",
+        recipe.outputLevel === "LRU" &&
+        requirement.inputLevel === "PCBA"
+          ? "PCBA"
+          : recipe.outputLevel === "LRU"
+            ? "CCA"
+            : "PCBA",
+      ksid: requirement.ksid ?? "",
+      pnName: requirement.pnName ?? "",
       rev: requirement.rev ?? "",
       quantityPerAssembly: Math.max(
         1,
         Number(requirement.quantityPerAssembly) || 1,
       ),
     })),
+  };
+}
+
+function normalizeKsid(value: string) {
+  return cleanImportedKsid(value).toUpperCase();
+}
+
+function buildKsidProfiles(jobs: Job[], quotes: QuoteRecord[]) {
+  const candidates = [
+    ...jobs.map((job, index) => ({
+      ksid: normalizeKsid(job.ksid),
+      division: job.division,
+      customer: job.customer,
+      pnName: job.pnName,
+      pn: job.pn,
+      rev: job.rev,
+      contact: job.contact,
+      lastUsed: `${job.createdDate || ""}T23:59:${String(
+        Math.max(0, 59 - index),
+      ).padStart(2, "0")}`,
+    })),
+    ...quotes.map((quote) => ({
+      ksid: normalizeKsid(quote.ksid),
+      division: quote.division,
+      customer: quote.customer,
+      pnName: quote.pnName,
+      pn: quote.pn,
+      rev: quote.rev,
+      contact: quote.contact,
+      lastUsed: quote.createdAt,
+    })),
+  ]
+    .filter((profile) => profile.ksid)
+    .sort((a, b) => b.lastUsed.localeCompare(a.lastUsed));
+  const profiles = new Map<string, KsidProfile>();
+  for (const candidate of candidates) {
+    const existing = profiles.get(candidate.ksid);
+    if (!existing) {
+      profiles.set(candidate.ksid, candidate);
+      continue;
+    }
+    profiles.set(candidate.ksid, {
+      ...existing,
+      pnName: existing.pnName || candidate.pnName,
+      pn: existing.pn || candidate.pn,
+      rev: existing.rev || candidate.rev,
+      contact: existing.contact || candidate.contact,
+    });
+  }
+  return [...profiles.values()];
+}
+
+function ksidProfileFor(value: string, profiles: KsidProfile[]) {
+  const normalized = normalizeKsid(value);
+  return normalized
+    ? profiles.find((profile) => profile.ksid === normalized) ?? null
+    : null;
+}
+
+function normalizeCustomerOrganizationFolder(
+  folder: CustomerOrganizationFolder,
+): CustomerOrganizationFolder {
+  return {
+    id: folder.id || makeId("customer-organization"),
+    division: folder.division === "Aerospace" ? "Aerospace" : "Commercial",
+    name: folder.name?.trim() || "Organization folder",
+    customers: Array.from(
+      new Set((folder.customers ?? []).map((customer) => customer.trim()).filter(Boolean)),
+    ),
+    collapsed: folder.collapsed ?? false,
   };
 }
 
@@ -1165,40 +1308,104 @@ function quantityNumber(value: string) {
   return Math.max(0, Number.parseFloat(value) || 0);
 }
 
-function assemblyRequirementProgress(job: Job, familyJobs: Job[]) {
+function linkedJobsFor(job: Job, jobs: Job[]) {
+  const explicitIds = new Set(job.linkedJobIds ?? []);
+  return jobs.filter(
+    (candidate) =>
+      candidate.id !== job.id &&
+      (explicitIds.has(candidate.id) ||
+        candidate.linkedJobIds?.includes(job.id) ||
+        Boolean(
+          job.familyId &&
+            candidate.familyId &&
+            job.familyId === candidate.familyId,
+        )),
+  );
+}
+
+function sameAssemblyInput(
+  left: AssemblyRequirement,
+  right: AssemblyRequirement,
+) {
+  return (
+    left.inputLevel === right.inputLevel &&
+    left.pn.trim().toLowerCase() === right.pn.trim().toLowerCase() &&
+    (!left.rev ||
+      !right.rev ||
+      left.rev.trim().toLowerCase() === right.rev.trim().toLowerCase())
+  );
+}
+
+function assemblyRequirementProgress(job: Job, jobs: Job[]) {
   const outputQuantity = Math.max(1, quantityNumber(job.quantity));
+  const linkedInputs = linkedJobsFor(job, jobs);
   return (job.assemblyRequirements ?? []).map((requirement) => {
-    const available = familyJobs
+    const matchingInputs = linkedInputs
       .filter(
         (candidate) =>
-          candidate.id !== job.id &&
-          (!(job.linkedJobIds?.length) || job.linkedJobIds.includes(candidate.id)) &&
           jobBuildLevel(candidate) === requirement.inputLevel &&
           candidate.pn.trim().toLowerCase() === requirement.pn.trim().toLowerCase() &&
           (!requirement.rev ||
             candidate.rev.trim().toLowerCase() === requirement.rev.trim().toLowerCase()),
-      )
+      );
+    const sourceIds = new Set(matchingInputs.map((candidate) => candidate.id));
+    const totalAvailable = matchingInputs
       .reduce((sum, candidate) => sum + (candidate.completedQuantity ?? 0), 0);
     const required = Number(requirement.quantityPerAssembly) * outputQuantity;
-    return { requirement, available, required, complete: available >= required };
+    const allocatedElsewhere = jobs
+      .filter(
+        (candidate) =>
+          candidate.id !== job.id &&
+          jobBuildLevel(candidate) !== "PCBA" &&
+          linkedJobsFor(candidate, jobs).some((input) => sourceIds.has(input.id)),
+      )
+      .reduce(
+        (sum, candidate) =>
+          sum +
+          (candidate.assemblyRequirements ?? [])
+            .filter((candidateRequirement) =>
+              sameAssemblyInput(requirement, candidateRequirement),
+            )
+            .reduce(
+              (requirementSum, candidateRequirement) =>
+                requirementSum +
+                Number(candidateRequirement.quantityPerAssembly || 0) *
+                  Math.max(1, quantityNumber(candidate.quantity)),
+              0,
+            ),
+        0,
+      );
+    const available = Math.max(0, totalAvailable - allocatedElsewhere);
+    const totalDemand = required + allocatedElsewhere;
+    const remainingAfterAll = totalAvailable - totalDemand;
+    return {
+      requirement,
+      available,
+      totalAvailable,
+      allocatedElsewhere,
+      required,
+      totalDemand,
+      remainingAfterAll,
+      shortage: Math.max(0, required - available),
+      complete: available >= required,
+    };
   });
 }
 
-function linkedJobsFor(job: Job, jobs: Job[]) {
-  return jobs.filter((candidate) => job.linkedJobIds?.includes(candidate.id));
-}
-
 function buildableAssemblyQuantity(job: Job, jobs: Job[]) {
-  const progress = assemblyRequirementProgress(job, linkedJobsFor(job, jobs));
+  const progress = assemblyRequirementProgress(job, jobs);
   if (!progress.length) return 0;
   return Math.max(
     0,
-    Math.floor(
-      Math.min(
-        ...progress.map((item) =>
-          Number(item.requirement.quantityPerAssembly) > 0
-            ? item.available / Number(item.requirement.quantityPerAssembly)
-            : 0,
+    Math.min(
+      Math.max(0, Math.floor(quantityNumber(job.quantity))),
+      Math.floor(
+        Math.min(
+          ...progress.map((item) =>
+            Number(item.requirement.quantityPerAssembly) > 0
+              ? item.available / Number(item.requirement.quantityPerAssembly)
+              : 0,
+          ),
         ),
       ),
     ),
@@ -1233,7 +1440,9 @@ function automaticAssemblyStatus(job: Job, jobs: Job[]) {
   ) {
     return job.status;
   }
-  const inputsReady = buildableAssemblyQuantity(job, jobs) > 0;
+  const progress = assemblyRequirementProgress(job, jobs);
+  const inputsReady =
+    progress.length > 0 && progress.every((requirement) => requirement.complete);
   if (inputsReady && assemblyShortagesReady(job)) {
     return "Ready for Mechanical Assembly" as JobStatus;
   }
@@ -1463,6 +1672,10 @@ export default function Home() {
   const [weeklyActionsHydrated, setWeeklyActionsHydrated] = useState(false);
   const [assemblyRecipes, setAssemblyRecipes] = useState<AssemblyRecipe[]>([]);
   const [assemblyRecipesHydrated, setAssemblyRecipesHydrated] = useState(false);
+  const [customerOrganizationFolders, setCustomerOrganizationFolders] =
+    useState<CustomerOrganizationFolder[]>([]);
+  const [customerOrganizationHydrated, setCustomerOrganizationHydrated] =
+    useState(false);
 
   useEffect(() => {
     const saved = window.localStorage.getItem(storageKey);
@@ -1536,6 +1749,25 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    let restored: CustomerOrganizationFolder[] = [];
+    try {
+      const raw = window.localStorage.getItem(customerOrganizationStorageKey);
+      if (raw) {
+        restored = (JSON.parse(raw) as CustomerOrganizationFolder[]).map(
+          normalizeCustomerOrganizationFolder,
+        );
+      }
+    } catch {
+      window.localStorage.removeItem(customerOrganizationStorageKey);
+    }
+    const frame = requestAnimationFrame(() => {
+      setCustomerOrganizationFolders(restored);
+      setCustomerOrganizationHydrated(true);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
+  useEffect(() => {
     function syncJobs(event: StorageEvent) {
       if (event.key !== storageKey || !event.newValue) return;
       try {
@@ -1561,6 +1793,30 @@ export default function Home() {
     }
     window.addEventListener("storage", syncQuotes);
     return () => window.removeEventListener("storage", syncQuotes);
+  }, []);
+
+  useEffect(() => {
+    function syncCustomerOrganization(event: StorageEvent) {
+      if (
+        event.key !== customerOrganizationStorageKey ||
+        !event.newValue
+      ) {
+        return;
+      }
+      try {
+        const incoming = JSON.parse(
+          event.newValue,
+        ) as CustomerOrganizationFolder[];
+        setCustomerOrganizationFolders(
+          incoming.map(normalizeCustomerOrganizationFolder),
+        );
+      } catch {
+        // Ignore an incomplete write from another tab.
+      }
+    }
+    window.addEventListener("storage", syncCustomerOrganization);
+    return () =>
+      window.removeEventListener("storage", syncCustomerOrganization);
   }, []);
 
   useEffect(() => {
@@ -1602,6 +1858,14 @@ export default function Home() {
       );
     }
   }, [assemblyRecipes, assemblyRecipesHydrated]);
+  useEffect(() => {
+    if (customerOrganizationHydrated) {
+      window.localStorage.setItem(
+        customerOrganizationStorageKey,
+        JSON.stringify(customerOrganizationFolders),
+      );
+    }
+  }, [customerOrganizationFolders, customerOrganizationHydrated]);
   useEffect(() => {
     const timer = window.setInterval(() => {
       setWeeklyActions((state) => {
@@ -1665,7 +1929,29 @@ export default function Home() {
       }) satisfies Record<Division, string[]>,
     [jobs],
   );
-  const actionItems = useMemo(() => actionItemsForJobs(jobs), [jobs]);
+  const ksidProfiles = useMemo(
+    () => buildKsidProfiles(jobs, quotes),
+    [jobs, quotes],
+  );
+  const allActionItems = useMemo(() => actionItemsForJobs(jobs), [jobs]);
+  const actionItems = useMemo(
+    () =>
+      allActionItems.filter((item) => {
+        const job = jobs.find((candidate) => candidate.id === item.jobId);
+        return !job?.actionDeferredUntil || daysUntil(job.actionDeferredUntil) <= 0;
+      }),
+    [allActionItems, jobs],
+  );
+  const deferredActionItems = useMemo(
+    () =>
+      allActionItems.filter((item) => {
+        const job = jobs.find((candidate) => candidate.id === item.jobId);
+        return Boolean(
+          job?.actionDeferredUntil && daysUntil(job.actionDeferredUntil) > 0,
+        );
+      }),
+    [allActionItems, jobs],
+  );
   const followUpItems = useMemo(() => followUpItemsForJobs(jobs), [jobs]);
 
   const metrics = useMemo(
@@ -1706,6 +1992,83 @@ export default function Home() {
     setSelectedCustomer(customer);
     setMenuOpen(false);
   }
+  function createCustomerOrganizationFolder(division: Division) {
+    const name = window
+      .prompt(`Enter a new ${division} organization folder name.`)
+      ?.trim();
+    if (!name) return;
+    if (
+      customerOrganizationFolders.some(
+        (folder) =>
+          folder.division === division &&
+          folder.name.trim().toLowerCase() === name.toLowerCase(),
+      )
+    ) {
+      notify(`A ${division} organization folder named ${name} already exists.`);
+      return;
+    }
+    setCustomerOrganizationFolders((current) => [
+      ...current,
+      {
+        id: makeId("customer-organization"),
+        division,
+        name,
+        customers: [],
+        collapsed: false,
+      },
+    ]);
+    notify(`${name} organization folder created.`);
+  }
+  function toggleCustomerOrganizationFolder(id: string) {
+    setCustomerOrganizationFolders((current) =>
+      current.map((folder) =>
+        folder.id === id
+          ? { ...folder, collapsed: !folder.collapsed }
+          : folder,
+      ),
+    );
+  }
+  function moveCustomerToOrganizationFolder(
+    division: Division,
+    customer: string,
+    folderId: string | null,
+  ) {
+    setCustomerOrganizationFolders((current) =>
+      current.map((folder) => {
+        if (folder.division !== division) return folder;
+        const withoutCustomer = folder.customers.filter(
+          (item) => item !== customer,
+        );
+        return folder.id === folderId
+          ? {
+              ...folder,
+              customers: [...withoutCustomer, customer].sort((a, b) =>
+                a.localeCompare(b),
+              ),
+            }
+          : { ...folder, customers: withoutCustomer };
+      }),
+    );
+  }
+  function deleteCustomerOrganizationFolder(id: string) {
+    const folder = customerOrganizationFolders.find((item) => item.id === id);
+    if (!folder) return;
+    if (
+      !window.confirm(
+        `Delete the organization folder "${folder.name}"?\n\nIts customer groups and jobs will not be deleted. They will return to the main customer list.`,
+      )
+    ) {
+      return;
+    }
+    setCustomerOrganizationFolders((current) =>
+      current.filter((item) => item.id !== id),
+    );
+    notify(
+      `${folder.name} deleted. ${folder.customers.length} customer group${
+        folder.customers.length === 1 ? "" : "s"
+      } preserved.`,
+    );
+  }
   function updateJob(id: string, change: Partial<Job>) {
     setJobs((current) =>
       reconcileAssemblyStatuses(
@@ -1713,7 +2076,51 @@ export default function Home() {
       ),
     );
   }
+  function deferJobActions(id: string, mode: FollowUpCadence) {
+    const until = followUpDate(mode);
+    updateJob(id, {
+      actionDeferralMode: mode,
+      actionDeferredUntil: until,
+    });
+    notify(
+      mode === "weekly"
+        ? `Action items moved to Next Week Follow Ups until Monday, ${dateLabel(until)}.`
+        : `Action items moved to 3-Day Follow Ups until ${dateLabel(until)}.`,
+    );
+  }
+  function returnJobActionsToMain(id: string) {
+    const job = jobs.find((item) => item.id === id);
+    if (!job) return;
+    const wasRecurring = Boolean(job.followUpCadence);
+    updateJob(id, {
+      followUpCadence: "",
+      actionDeferralMode: "",
+      actionDeferredUntil: "",
+    });
+    notify(
+      wasRecurring
+        ? `Job #${job.jobNumber} returned to the main Action Items list and its recurring follow-up classification was removed.`
+        : `Job #${job.jobNumber} returned to the main Action Items list.`,
+    );
+  }
   function deleteJob(id: string) {
+    const job = jobs.find((item) => item.id === id);
+    if (!job) return;
+    if (
+      !window.confirm(
+        `Delete Job #${job.jobNumber} for ${job.customer}?\n\nThis is the first confirmation. The job has not been deleted yet.`,
+      )
+    ) {
+      return;
+    }
+    if (
+      !window.confirm(
+        `Second confirmation: permanently delete Job #${job.jobNumber}?\n\nThis removes its workflow, shortages, tracking, and attached notes from this device.`,
+      )
+    ) {
+      notify("Job deletion canceled. No data was changed.");
+      return;
+    }
     setJobs((current) => {
       const next = reconcileAssemblyStatuses(
         current.filter((job) => job.id !== id),
@@ -1727,7 +2134,19 @@ export default function Home() {
   }
 
   function createJob(jobOrJobs: Job | Job[]) {
-    const createdJobs = Array.isArray(jobOrJobs) ? jobOrJobs : [jobOrJobs];
+    const incomingJobs = Array.isArray(jobOrJobs) ? jobOrJobs : [jobOrJobs];
+    const createdIds = incomingJobs.map((createdJob) => createdJob.id);
+    const createdJobs = incomingJobs.map((createdJob) =>
+      normalizeJob({
+        ...createdJob,
+        linkedJobIds: Array.from(
+          new Set([
+            ...(createdJob.linkedJobIds ?? []),
+            ...createdIds.filter((id) => id !== createdJob.id),
+          ]),
+        ),
+      }),
+    );
     const job = createdJobs[0];
     setJobs((current) =>
       reconcileAssemblyStatuses([...createdJobs, ...current]),
@@ -1804,7 +2223,29 @@ export default function Home() {
   }
 
   function bookOldJob(job: Job) {
-    setJobs((current) => reconcileAssemblyStatuses([normalizeJob(job), ...current]));
+    setJobs((current) => {
+      const familyJobs = job.familyId
+        ? current.filter((candidate) => candidate.familyId === job.familyId)
+        : [];
+      const familyIds = familyJobs.map((candidate) => candidate.id);
+      const normalized = normalizeJob({
+        ...job,
+        linkedJobIds: Array.from(
+          new Set([...(job.linkedJobIds ?? []), ...familyIds]),
+        ),
+      });
+      const next = current.map((candidate) =>
+        familyIds.includes(candidate.id)
+          ? normalizeJob({
+              ...candidate,
+              linkedJobIds: Array.from(
+                new Set([...(candidate.linkedJobIds ?? []), normalized.id]),
+              ),
+            })
+          : candidate,
+      );
+      return reconcileAssemblyStatuses([normalized, ...next]);
+    });
     notify(`Job #${job.jobNumber} confirmed and booked in ${job.customer}.`);
   }
 
@@ -1928,6 +2369,11 @@ export default function Home() {
         "Record ID": recipe.id,
         Payload: JSON.stringify(recipe),
       })),
+      ...customerOrganizationFolders.map((folder) => ({
+        "Record Type": "Customer Organization Folder",
+        "Record ID": folder.id,
+        Payload: JSON.stringify(folder),
+      })),
       {
         "Record Type": "Weekly Actions",
         "Record ID": weeklyActions.current.weekStart,
@@ -1944,6 +2390,7 @@ export default function Home() {
       ["Jobs", jobs.length],
       ["Quotes", quotes.length],
       ["Assembly Configurations", assemblyRecipes.length],
+      ["Customer Organization Folders", customerOrganizationFolders.length],
       ["Weekly Action Archives", weeklyActions.archives.length],
       [],
       [
@@ -1991,12 +2438,19 @@ export default function Home() {
         .map((row) =>
           normalizeAssemblyRecipe(JSON.parse(row.payload) as AssemblyRecipe),
         );
+      const importedOrganizationFolders = parsed
+        .filter((row) => row.type === "Customer Organization Folder")
+        .map((row) =>
+          normalizeCustomerOrganizationFolder(
+            JSON.parse(row.payload) as CustomerOrganizationFolder,
+          ),
+        );
       const weeklyRow = parsed.find((row) => row.type === "Weekly Actions");
       const importedWeekly = weeklyRow
         ? normalizeWeeklyActions(JSON.parse(weeklyRow.payload) as WeeklyActionsState)
         : normalizeWeeklyActions(null);
       const approved = window.confirm(
-        `Import ${importedJobs.length} jobs, ${importedQuotes.length} quotes, and ${importedRecipes.length} assembly configurations from ${file.name}?\n\nThis will replace the jobs, quotes, configurations, and Weekly Actions currently stored on this computer.`,
+        `Import ${importedJobs.length} jobs, ${importedQuotes.length} quotes, ${importedRecipes.length} assembly configurations, and ${importedOrganizationFolders.length} organization folders from ${file.name}?\n\nThis will replace the jobs, quotes, configurations, organization folders, and Weekly Actions currently stored on this computer.`,
       );
       if (!approved) {
         notify("Backup import canceled. No data was changed.");
@@ -2005,12 +2459,13 @@ export default function Home() {
       setJobs(reconcileAssemblyStatuses(importedJobs));
       setQuotes(importedQuotes);
       setAssemblyRecipes(importedRecipes);
+      setCustomerOrganizationFolders(importedOrganizationFolders);
       setWeeklyActions(importedWeekly);
       setSelectedJobId(null);
       setSelectedQuoteId(null);
       setShowNewJob(false);
       notify(
-        `Backup restored: ${importedJobs.length} jobs, ${importedQuotes.length} quotes, and ${importedRecipes.length} assembly configurations.`,
+        `Backup restored: ${importedJobs.length} jobs, ${importedQuotes.length} quotes, ${importedRecipes.length} assembly configurations, and ${importedOrganizationFolders.length} organization folders.`,
       );
     } catch {
       notify("This file is not a valid Krypton Solutions OOR complete backup.");
@@ -2022,6 +2477,8 @@ export default function Home() {
   const title =
     activeView === "overview"
       ? "Production overview"
+      : activeView === "configurations"
+        ? "Preset Mechanical Configs"
       : (navItems.find((item) => item.id === activeView)?.label ??
         "Krypton Solutions OOR");
 
@@ -2050,6 +2507,54 @@ export default function Home() {
                   : null;
             if (division) {
               const isExpanded = expandedDivisions.includes(division);
+              const organizationFolders = customerOrganizationFolders
+                .filter((folder) => folder.division === division)
+                .sort((a, b) => a.name.localeCompare(b.name));
+              const availableCustomers = new Set(
+                customersByDivision[division],
+              );
+              const assignedCustomers = new Set(
+                organizationFolders.flatMap((folder) =>
+                  folder.customers.filter((customer) =>
+                    availableCustomers.has(customer),
+                  ),
+                ),
+              );
+              const unfiledCustomers = customersByDivision[division].filter(
+                (customer) => !assignedCustomers.has(customer),
+              );
+              const customerButton = (customer: string) => (
+                <button
+                  className={
+                    activeView === item.id && selectedCustomer === customer
+                      ? "active"
+                      : ""
+                  }
+                  draggable
+                  key={customer}
+                  onDragStart={(event) => {
+                    event.dataTransfer.setData(
+                      "application/x-krypton-customer",
+                      JSON.stringify({ division, customer }),
+                    );
+                    event.dataTransfer.effectAllowed = "move";
+                  }}
+                  onClick={() => openCustomer(division, customer)}
+                >
+                  <span className="subnav-branch" />
+                  <span>{customer}</span>
+                  <b>
+                    {
+                      jobs.filter(
+                        (job) =>
+                          job.division === division &&
+                          job.customer === customer &&
+                          job.status !== "Complete",
+                      ).length
+                    }
+                  </b>
+                </button>
+              );
               return (
                 <div className="division-nav-group" key={item.id}>
                   <div className="division-nav-row">
@@ -2074,30 +2579,122 @@ export default function Home() {
                   </div>
                   {isExpanded && (
                     <div className="customer-subnav">
-                      {customersByDivision[division].map((customer) => (
-                        <button
-                          className={
-                            activeView === item.id && selectedCustomer === customer
-                              ? "active"
-                              : ""
-                          }
-                          key={customer}
-                          onClick={() => openCustomer(division, customer)}
-                        >
-                          <span className="subnav-branch" />
-                          <span>{customer}</span>
-                          <b>
-                            {
-                              jobs.filter(
-                                (job) =>
-                                  job.division === division &&
-                                  job.customer === customer &&
-                                  job.status !== "Complete",
-                              ).length
+                      <button
+                        className="organization-folder-create"
+                        onClick={() =>
+                          createCustomerOrganizationFolder(division)
+                        }
+                      >
+                        <Plus size={14} />
+                        <span>New organization folder</span>
+                      </button>
+                      {organizationFolders.map((folder) => {
+                        const folderCustomers = folder.customers.filter(
+                          (customer) => availableCustomers.has(customer),
+                        );
+                        return (
+                          <section
+                            className="organization-folder"
+                            key={folder.id}
+                            onDragOver={(event) => {
+                              event.preventDefault();
+                              event.dataTransfer.dropEffect = "move";
+                            }}
+                            onDrop={(event) => {
+                              event.preventDefault();
+                              try {
+                                const dragged = JSON.parse(
+                                  event.dataTransfer.getData(
+                                    "application/x-krypton-customer",
+                                  ),
+                                ) as {
+                                  division: Division;
+                                  customer: string;
+                                };
+                                if (dragged.division === division) {
+                                  moveCustomerToOrganizationFolder(
+                                    division,
+                                    dragged.customer,
+                                    folder.id,
+                                  );
+                                }
+                              } catch {
+                                // Ignore unrelated drag data.
+                              }
+                            }}
+                          >
+                            <div className="organization-folder-heading">
+                              <button
+                                className="organization-folder-toggle"
+                                aria-expanded={!folder.collapsed}
+                                aria-label={`${
+                                  folder.collapsed ? "Expand" : "Collapse"
+                                } ${folder.name}`}
+                                onClick={() =>
+                                  toggleCustomerOrganizationFolder(folder.id)
+                                }
+                              >
+                                {folder.collapsed ? (
+                                  <ChevronRight size={15} />
+                                ) : (
+                                  <ChevronDown size={15} />
+                                )}
+                                <Folder size={14} />
+                                <span>{folder.name}</span>
+                                <b>{folderCustomers.length}</b>
+                              </button>
+                              <button
+                                className="organization-folder-delete"
+                                aria-label={`Delete ${folder.name} organization folder`}
+                                title="Delete folder; preserve customer groups"
+                                onClick={() =>
+                                  deleteCustomerOrganizationFolder(folder.id)
+                                }
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                            {!folder.collapsed && (
+                              <div className="organization-folder-customers">
+                                {folderCustomers.map(customerButton)}
+                                {!folderCustomers.length && (
+                                  <small>Drag a customer group here</small>
+                                )}
+                              </div>
+                            )}
+                          </section>
+                        );
+                      })}
+                      {unfiledCustomers.length > 0 && (
+                        <div
+                          className="organization-folder-customers unfiled-customer-list"
+                          onDragOver={(event) => event.preventDefault()}
+                          onDrop={(event) => {
+                            event.preventDefault();
+                            try {
+                              const dragged = JSON.parse(
+                                event.dataTransfer.getData(
+                                  "application/x-krypton-customer",
+                                ),
+                              ) as {
+                                division: Division;
+                                customer: string;
+                              };
+                              if (dragged.division === division) {
+                                moveCustomerToOrganizationFolder(
+                                  division,
+                                  dragged.customer,
+                                  null,
+                                );
+                              }
+                            } catch {
+                              // Ignore unrelated drag data.
                             }
-                          </b>
-                        </button>
-                      ))}
+                          }}
+                        >
+                          {unfiledCustomers.map(customerButton)}
+                        </div>
+                      )}
                       {!customersByDivision[division].length && (
                         <small>No customer sub-categories yet</small>
                       )}
@@ -2222,11 +2819,20 @@ export default function Home() {
           <AssemblyConfigurationsView
             recipes={assemblyRecipes}
             onChange={setAssemblyRecipes}
+            ksidProfiles={ksidProfiles}
+            onBack={() => setActiveView("integrations")}
             notify={notify}
           />
         )}
         {activeView === "actions" && (
-          <ActionItemsView items={actionItems} onOpen={openJobTab} />
+          <ActionItemsView
+            items={actionItems}
+            deferredItems={deferredActionItems}
+            jobs={jobs}
+            onOpen={openJobTab}
+            onDefer={deferJobActions}
+            onReturnToMain={returnJobActionsToMain}
+          />
         )}
         {activeView === "follow-ups" && (
           <FollowUpListView
@@ -2242,6 +2848,7 @@ export default function Home() {
             onExportBackup={exportCompleteBackup}
             onImportBackup={importCompleteBackup}
             onOpenOldData={() => setShowOldDataImport(true)}
+            onOpenConfigurations={() => setActiveView("configurations")}
             weeklyArchives={weeklyActions.archives}
           />
         )}
@@ -2253,18 +2860,24 @@ export default function Home() {
           onCreate={createJob}
           recipes={assemblyRecipes}
           jobs={jobs}
+          ksidProfiles={ksidProfiles}
         />
       )}
       {showNewRfq && (
         <NewRfqModal
           onClose={() => setShowNewRfq(false)}
           onCreate={createQuote}
+          jobs={jobs}
+          quotes={quotes}
+          ksidProfiles={ksidProfiles}
         />
       )}
       {showOldDataImport && (
         <OldDataImportModal
           onClose={() => setShowOldDataImport(false)}
           onBook={bookOldJob}
+          jobs={jobs}
+          ksidProfiles={ksidProfiles}
         />
       )}
       {selectedJob && (
@@ -2282,6 +2895,7 @@ export default function Home() {
       {selectedQuote && (
         <QuoteDetailWindow
           quote={selectedQuote}
+          ksidProfiles={ksidProfiles}
           onClose={closeWorkspaceTab}
           onUpdate={(change) => updateQuote(selectedQuote.id, change)}
           notify={notify}
@@ -2772,14 +3386,14 @@ function QuotesView({
           <button
             className="button secondary"
             onClick={() => onCreateFolder("Commercial")}
-            title="Select a customer folder inside Q:\Customer RFQs"
+            title="Create under Q:\Customer RFQs"
           >
             <Folder size={17} /> Create RFQ Folder for Commercial
           </button>
           <button
             className="button secondary"
             onClick={() => onCreateFolder("Aerospace")}
-            title="Select a customer folder inside P:\RFQs"
+            title="Create under P:\RFQs"
           >
             <Folder size={17} /> Create RFQ Folder for Aerospace
           </button>
@@ -3041,18 +3655,68 @@ function QuotesView({
 function NewRfqModal({
   onClose,
   onCreate,
+  jobs,
+  quotes,
+  ksidProfiles,
 }: {
   onClose: () => void;
   onCreate: (quote: QuoteRecord) => void;
+  jobs: Job[];
+  quotes: QuoteRecord[];
+  ksidProfiles: KsidProfile[];
 }) {
   const [division, setDivision] = useState<Division>("Commercial");
   const [tags, setTags] = useState<RFQTag[]>([]);
-  const [fields, setFields] = useState({ customer: "", contact: "", pn: "", rev: "", quantity: "", ksid: "", dueDate: "", notes: "" });
+  const [fields, setFields] = useState({ customer: "", contact: "", pnName: "", pn: "", rev: "", quantity: "", ksid: "", dueDate: "", notes: "" });
   const [scanState, setScanState] = useState("");
   const uploadRef = useRef<HTMLInputElement>(null);
+  const customerSuggestions = useMemo(
+    () =>
+      Array.from(
+        new Set([
+          ...jobs
+            .filter((job) => job.division === division)
+            .map((job) => job.customer.trim()),
+          ...quotes
+            .filter((quote) => quote.division === division)
+            .map((quote) => quote.customer.trim()),
+        ]),
+      )
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b)),
+    [division, jobs, quotes],
+  );
 
   function updateField(key: keyof typeof fields, value: string) {
     setFields((current) => ({ ...current, [key]: value }));
+  }
+
+  function applyKsid() {
+    const profile = ksidProfileFor(fields.ksid, ksidProfiles);
+    if (!fields.ksid.trim()) {
+      setFields((current) => ({
+        ...current,
+        customer: "",
+        contact: "",
+        pnName: "",
+        pn: "",
+        rev: "",
+      }));
+      return;
+    }
+    if (!profile) return;
+    setFields((current) => ({
+      ...current,
+      customer: profile.customer,
+      contact: profile.contact,
+      pnName: profile.pnName,
+      pn: profile.pn,
+      rev: profile.rev,
+    }));
+    setDivision(profile.division);
+    setScanState(
+      `KSID matched. PN details and the most recent ${profile.division} customer folder were filled in; every field remains editable.`,
+    );
   }
 
   async function scanRfqPhoto(event: ChangeEvent<HTMLInputElement>) {
@@ -3062,15 +3726,19 @@ function NewRfqModal({
     try {
       const text = await recognizeScreenshot(file);
       const detected = parseRfqScreenshot(text);
+      const profile = ksidProfileFor(detected.ksid, ksidProfiles);
       setTags(detected.tags);
       setFields((current) => ({
         ...current,
-        contact: detected.contact,
-        pn: detected.pn,
-        rev: detected.rev,
+        contact: detected.contact || profile?.contact || "",
+        pnName: profile?.pnName || current.pnName,
+        pn: detected.pn || profile?.pn || "",
+        rev: detected.rev || profile?.rev || "",
+        customer: profile?.customer || current.customer,
         ksid: detected.ksid,
         dueDate: detected.dueDate,
       }));
+      if (profile) setDivision(profile.division);
       const populated = [detected.contact, detected.pn, detected.rev, detected.ksid, detected.dueDate].filter(Boolean).length;
       setScanState(`Scan complete. ${populated} details populated. Review the red Missing cues, edit anything needed, then book the RFQ.`);
     } catch {
@@ -3100,6 +3768,7 @@ function NewRfqModal({
       customer: fields.customer.trim(),
       tags,
       contact: fields.contact.trim(),
+      pnName: fields.pnName.trim(),
       pn: fields.pn.trim(),
       quantity: fields.quantity.trim(),
       rev: fields.rev.trim(),
@@ -3177,12 +3846,30 @@ function NewRfqModal({
 
         <div className="rfq-form-grid">
           <label className="wide">
-            Customer Name {missingCue(missing(fields.customer))}
-            <input className={missing(fields.customer) ? "missing-input" : ""} value={fields.customer} onChange={(event) => updateField("customer", event.target.value)} />
+            Existing Customer or New Customer {missingCue(missing(fields.customer))}
+            <input
+              className={missing(fields.customer) ? "missing-input" : ""}
+              list={`quote-customer-options-${division.toLowerCase()}`}
+              value={fields.customer}
+              onChange={(event) => updateField("customer", event.target.value)}
+              placeholder="Search existing customers or type a new one"
+            />
+            <datalist id={`quote-customer-options-${division.toLowerCase()}`}>
+              {customerSuggestions.map((customer) => (
+                <option key={customer} value={customer} />
+              ))}
+            </datalist>
+            <small>
+              Select a saved customer to avoid duplicates. A new name creates a new quote customer group.
+            </small>
           </label>
           <label className="wide">
             Contact {missingCue(missing(fields.contact))}
             <input className={missing(fields.contact) ? "missing-input" : ""} value={fields.contact} onChange={(event) => updateField("contact", event.target.value)} />
+          </label>
+          <label>
+            PN Name {missingCue(missing(fields.pnName))}
+            <input className={missing(fields.pnName) ? "missing-input" : ""} value={fields.pnName} onChange={(event) => updateField("pnName", event.target.value)} />
           </label>
           <label>
             PN# {missingCue(missing(fields.pn))}
@@ -3198,7 +3885,7 @@ function NewRfqModal({
           </label>
           <label>
             KSID <span>(if applicable)</span>
-            <input value={fields.ksid} onChange={(event) => updateField("ksid", event.target.value)} />
+            <input value={fields.ksid} onChange={(event) => updateField("ksid", event.target.value)} onBlur={applyKsid} />
           </label>
           <label>
             Due Date {missingCue(missing(fields.dueDate))}
@@ -3251,11 +3938,13 @@ function NewRfqModal({
 
 function QuoteDetailWindow({
   quote,
+  ksidProfiles,
   onClose,
   onUpdate,
   notify,
 }: {
   quote: QuoteRecord;
+  ksidProfiles: KsidProfile[];
   onClose: () => void;
   onUpdate: (change: Partial<QuoteRecord>) => void;
   notify: (message: string) => void;
@@ -3263,6 +3952,30 @@ function QuoteDetailWindow({
   const [noteDate, setNoteDate] = useState(chicagoDateKey());
   const [noteText, setNoteText] = useState("");
   const [editingDetails, setEditingDetails] = useState(false);
+
+  function updateQuoteKsid(value: string) {
+    const profile = ksidProfileFor(value, ksidProfiles);
+    onUpdate({
+      ksid: value,
+      ...(profile
+        ? {
+            division: profile.division,
+            customer: profile.customer,
+            contact: profile.contact,
+            pnName: profile.pnName,
+            pn: profile.pn,
+            rev: profile.rev,
+          }
+        : !value.trim()
+          ? { customer: "", contact: "", pnName: "", pn: "", rev: "" }
+          : {}),
+    });
+    if (profile) {
+      notify(
+        "KSID matched. Quote part details and the most recent customer folder were filled in and remain editable.",
+      );
+    }
+  }
 
   function toggleQuoteTag(tag: RFQTag) {
     onUpdate({
@@ -3367,6 +4080,13 @@ function QuoteDetailWindow({
                   />
                 </label>
                 <label>
+                  PN Name
+                  <input
+                    value={quote.pnName}
+                    onChange={(event) => onUpdate({ pnName: event.target.value })}
+                  />
+                </label>
+                <label>
                   PN#
                   <input
                     value={quote.pn}
@@ -3395,6 +4115,7 @@ function QuoteDetailWindow({
                   <input
                     value={quote.ksid}
                     onChange={(event) => onUpdate({ ksid: event.target.value })}
+                    onBlur={() => updateQuoteKsid(quote.ksid)}
                   />
                 </label>
                 <label>
@@ -3438,6 +4159,10 @@ function QuoteDetailWindow({
               <div>
                 <small>Contact</small>
                 <strong>{quote.contact}</strong>
+              </div>
+              <div>
+                <small>PN Name</small>
+                <strong>{quote.pnName || "—"}</strong>
               </div>
               <div>
                 <small>PN#</small>
@@ -3616,10 +4341,18 @@ function DockAlertChart({
 
 function ActionItemsView({
   items,
+  deferredItems,
+  jobs,
   onOpen,
+  onDefer,
+  onReturnToMain,
 }: {
   items: ActionItem[];
+  deferredItems: ActionItem[];
+  jobs: Job[];
   onOpen: (id: string) => void;
+  onDefer: (id: string, mode: FollowUpCadence) => void;
+  onReturnToMain: (id: string) => void;
 }) {
   const [dueFilter, setDueFilter] = useState<
     "all" | "past-due" | "due-today" | "due-tomorrow"
@@ -3713,6 +4446,7 @@ function ActionItemsView({
                   <span>KSID #</span>
                   <span>Actions needed</span>
                   <span>Next due</span>
+                  <span>Follow-Up Later</span>
                   <span />
                 </div>
                 {divisionGroups.map((group) => {
@@ -3741,6 +4475,22 @@ function ActionItemsView({
                     <span className={daysUntil(nextDue.dueDate) < 0 ? "urgent" : ""}>
                       {dateLabel(nextDue.dueDate)}<small>{dueCopy(nextDue.dueDate)}</small>
                     </span>
+                    <div className="action-defer-buttons" onClick={(event) => event.stopPropagation()}>
+                      <button
+                        type="button"
+                        className="button secondary small"
+                        onClick={() => onDefer(first.jobId, "weekly")}
+                      >
+                        Weekly Follow-Up
+                      </button>
+                      <button
+                        type="button"
+                        className="button secondary small"
+                        onClick={() => onDefer(first.jobId, "three-day")}
+                      >
+                        3-Day Follow-Up
+                      </button>
+                    </div>
                     <div className="row-actions" onClick={(event) => event.stopPropagation()}>
                       <button
                         className="icon-button"
@@ -3771,6 +4521,123 @@ function ActionItemsView({
           </section>
         );
       })}
+      {(["weekly", "three-day"] as FollowUpCadence[]).map((mode) => {
+        const modeItems = deferredItems.filter((item) => {
+          const job = jobs.find((candidate) => candidate.id === item.jobId);
+          return job?.actionDeferralMode === mode;
+        });
+        const grouped = Object.values(
+          modeItems.reduce<Record<string, ActionItem[]>>((groups, item) => {
+            (groups[item.jobId] ??= []).push(item);
+            return groups;
+          }, {}),
+        );
+        return (
+          <details
+            className="panel action-division deferred-action-section collapsible-follow-up-section"
+            key={mode}
+          >
+            <summary className="panel-header collapsible-follow-up-summary">
+              <div>
+                <p className="section-kicker">Follow Up Later</p>
+                <h2>{mode === "weekly" ? "Next Week Follow Ups" : "3-Day Follow Ups"}</h2>
+                <p>
+                  These action items return to the main list on their scheduled
+                  date and remain there until cleared or deferred again.
+                </p>
+              </div>
+              <div className="collapsible-follow-up-summary-actions">
+                <span className="count-badge">{grouped.length} jobs</span>
+                <ChevronDown className="collapsible-follow-up-chevron" size={19} />
+              </div>
+            </summary>
+            <div className="collapsible-follow-up-content">
+              {grouped.length ? (
+                <div className="deferred-action-list">
+                  {grouped.map((group) => {
+                    const first = group[0];
+                    const job = jobs.find((candidate) => candidate.id === first.jobId);
+                    return (
+                      <article className="deferred-action-row" key={first.jobId}>
+                        <button
+                          type="button"
+                          className="deferred-action-open"
+                          onClick={() => onOpen(first.jobId)}
+                        >
+                          <span><strong>{first.customer}</strong><small>Job #{first.jobNumber} · KSID {first.ksid}</small></span>
+                          <span>{group.length} action{group.length === 1 ? "" : "s"}</span>
+                          <span><small>Returns to main list</small><strong>{dateLabel(job?.actionDeferredUntil ?? "")}</strong></span>
+                          <ChevronRight size={17} />
+                        </button>
+                        <button
+                          type="button"
+                          className="button secondary small return-to-main-button"
+                          onClick={() => onReturnToMain(first.jobId)}
+                        >
+                          Return to Main List
+                        </button>
+                      </article>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="clear-state">
+                  <CheckCircle2 size={20} /> No jobs are deferred to this section.
+                </div>
+              )}
+            </div>
+          </details>
+        );
+      })}
+      <details className="panel classified-follow-ups collapsible-follow-up-section">
+        <summary className="panel-header collapsible-follow-up-summary">
+          <div>
+            <p className="section-kicker">Job classifications</p>
+            <h2>Recurring Follow-Up Jobs</h2>
+            <p>All active jobs classified for Weekly or 3-Day follow-up.</p>
+          </div>
+          <div className="collapsible-follow-up-summary-actions">
+            <span className="count-badge">
+              {jobs.filter(
+                (job) => job.status !== "Complete" && Boolean(job.followUpCadence),
+              ).length} jobs
+            </span>
+            <ChevronDown className="collapsible-follow-up-chevron" size={19} />
+          </div>
+        </summary>
+        <div className="classified-follow-up-grid collapsible-follow-up-content">
+          {(["weekly", "three-day"] as FollowUpCadence[]).map((mode) => {
+            const classified = jobs.filter(
+              (job) => job.status !== "Complete" && job.followUpCadence === mode,
+            );
+            return (
+              <div key={mode}>
+                <h3>{mode === "weekly" ? "Weekly Follow-Ups" : "3-Day Follow-Ups"}</h3>
+                {classified.map((job) => (
+                  <div className="classified-follow-up-row" key={job.id}>
+                    <button
+                      type="button"
+                      className="classified-job-open"
+                      onClick={() => onOpen(job.id)}
+                    >
+                      <span><strong>{job.customer}</strong><small>Job #{job.jobNumber} · KSID {job.ksid}</small></span>
+                      <ChevronRight size={16} />
+                    </button>
+                    <button
+                      type="button"
+                      className="button secondary small return-to-main-button"
+                      onClick={() => onReturnToMain(job.id)}
+                    >
+                      Return to Main List
+                    </button>
+                  </div>
+                ))}
+                {!classified.length && <p>No jobs classified.</p>}
+              </div>
+            );
+          })}
+        </div>
+      </details>
     </section>
   );
 }
@@ -4774,12 +5641,14 @@ function IntegrationsView({
   onExportBackup,
   onImportBackup,
   onOpenOldData,
+  onOpenConfigurations,
   weeklyArchives,
 }: {
   onExport: () => void;
   onExportBackup: () => void;
   onImportBackup: (event: ChangeEvent<HTMLInputElement>) => void;
   onOpenOldData: () => void;
+  onOpenConfigurations: () => void;
   weeklyArchives: WeeklyWorkWeek[];
 }) {
   return (
@@ -4802,9 +5671,10 @@ function IntegrationsView({
             <h3>Complete backup &amp; restore</h3>
             <p>
               Export all jobs, quotes, shortages, notes, tracking, completed
-              records, assembly configurations, Project Families, and Weekly
-              Actions. Import the same workbook on another computer to restore
-              the exact saved data.
+              records, Mechanical Config presets, Project Families,
+              Manufacturing organization folders, and Weekly Actions. Import
+              the same workbook on another computer to restore the exact saved
+              data.
             </p>
           </div>
           <div className="backup-actions">
@@ -4840,6 +5710,27 @@ function IntegrationsView({
           </div>
           <button className="button primary full" onClick={onOpenOldData}>
             <Upload size={16} /> New Project Entry
+          </button>
+        </article>
+        <article className="panel integration-card mechanical-preset-card">
+          <span className="integration-icon old-data">
+            <Settings2 />
+          </span>
+          <div>
+            <small>CCA and LRU quick booking</small>
+            <h3>Preset Mechanical Configs</h3>
+            <p>
+              Save KSID-linked CCA and LRU configurations. Applying a preset to
+              New Project fills the business section, customer folder, PN Name,
+              PN#, Rev, contact, and assembly settings while leaving Job#, QTY,
+              PO#, and Quote# for manual entry.
+            </p>
+          </div>
+          <button
+            className="button primary full"
+            onClick={onOpenConfigurations}
+          >
+            <Settings2 size={16} /> Manage Mechanical Configs
           </button>
         </article>
         <article className="panel integration-card weekly-actions-card">
@@ -4943,37 +5834,69 @@ function IntegrationsView({
 function AssemblyConfigurationsView({
   recipes,
   onChange,
+  ksidProfiles,
+  onBack,
   notify,
 }: {
   recipes: AssemblyRecipe[];
   onChange: (recipes: AssemblyRecipe[]) => void;
+  ksidProfiles: KsidProfile[];
+  onBack: () => void;
   notify: (message: string) => void;
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [outputLevel, setOutputLevel] =
     useState<AssemblyRecipe["outputLevel"]>("CCA");
+  const [outputKsid, setOutputKsid] = useState("");
+  const [division, setDivision] = useState<Division>("Commercial");
+  const [customer, setCustomer] = useState("");
+  const [pnName, setPnName] = useState("");
   const [outputPn, setOutputPn] = useState("");
   const [outputRev, setOutputRev] = useState("");
+  const [contact, setContact] = useState("");
+  const [assemblyTurnDays, setAssemblyTurnDays] = useState(1);
   const [requirements, setRequirements] = useState<AssemblyRequirement[]>([
     {
       id: makeId("requirement"),
       inputLevel: "PCBA",
+      ksid: "",
+      pnName: "",
       pn: "",
       rev: "",
       quantityPerAssembly: 1,
     },
   ]);
+  const customerSuggestions = useMemo(
+    () =>
+      [
+        ...new Set(
+          ksidProfiles
+            .filter((profile) => profile.division === division)
+            .map((profile) => profile.customer.trim())
+            .filter(Boolean),
+        ),
+      ].sort((a, b) => a.localeCompare(b)),
+    [division, ksidProfiles],
+  );
 
   function clearForm(level: AssemblyRecipe["outputLevel"] = outputLevel) {
     setEditingId(null);
     setName("");
+    setOutputKsid("");
+    setDivision("Commercial");
+    setCustomer("");
+    setPnName("");
     setOutputPn("");
     setOutputRev("");
+    setContact("");
+    setAssemblyTurnDays(1);
     setRequirements([
       {
         id: makeId("requirement"),
         inputLevel: level === "CCA" ? "PCBA" : "CCA",
+        ksid: "",
+        pnName: "",
         pn: "",
         rev: "",
         quantityPerAssembly: 1,
@@ -5000,27 +5923,100 @@ function AssemblyConfigurationsView({
     );
   }
 
+  function updateRequirementKsid(id: string, value: string) {
+    if (!value.trim()) {
+      updateRequirement(id, { ksid: "", pnName: "", pn: "", rev: "" });
+      return;
+    }
+    const profile = ksidProfileFor(value, ksidProfiles);
+    const savedComponent = recipes.find(
+      (recipe) =>
+        normalizeKsid(recipe.outputKsid) === normalizeKsid(value),
+    );
+    updateRequirement(id, {
+      ksid: value,
+      ...(profile || savedComponent
+        ? {
+            pnName: profile?.pnName || savedComponent?.pnName || "",
+            pn: profile?.pn || savedComponent?.outputPn || "",
+            rev: profile?.rev || savedComponent?.outputRev || "",
+          }
+        : {}),
+    });
+    if (profile || savedComponent) {
+      notify(
+        `KSID matched. ${
+          profile?.pnName ||
+          savedComponent?.pnName ||
+          profile?.pn ||
+          savedComponent?.outputPn
+        } was filled into the required component and remains editable.`,
+      );
+    }
+  }
+
+  function updateOutputKsid(value: string) {
+    setOutputKsid(value);
+    if (!value.trim()) {
+      setCustomer("");
+      setPnName("");
+      setOutputPn("");
+      setOutputRev("");
+      setContact("");
+      return;
+    }
+    const profile = ksidProfileFor(value, ksidProfiles);
+    if (!profile) return;
+    setDivision(profile.division);
+    setCustomer(profile.customer);
+    setPnName(profile.pnName);
+    setOutputPn(profile.pn);
+    setOutputRev(profile.rev);
+    setContact(profile.contact);
+    notify(
+      "KSID matched. The preset output and most recent customer folder were filled in and remain editable.",
+    );
+  }
+
   function save(event: FormEvent) {
     event.preventDefault();
     const cleanRequirements = requirements
       .filter((item) => item.pn.trim())
       .map((item) => ({
         ...item,
-        inputLevel: outputLevel === "CCA" ? ("PCBA" as const) : ("CCA" as const),
+        inputLevel:
+          outputLevel === "CCA" ? ("PCBA" as const) : item.inputLevel,
+        ksid: item.ksid.trim(),
+        pnName: item.pnName.trim(),
         pn: item.pn.trim(),
         rev: item.rev.trim(),
         quantityPerAssembly: Math.max(1, Number(item.quantityPerAssembly) || 1),
       }));
-    if (!name.trim() || !outputPn.trim() || !cleanRequirements.length) {
-      notify("Enter a configuration name, output PN, and at least one required input PN.");
+    if (
+      !name.trim() ||
+      !outputKsid.trim() ||
+      !customer.trim() ||
+      !pnName.trim() ||
+      !outputPn.trim() ||
+      !cleanRequirements.length
+    ) {
+      notify(
+        "Enter a preset name, output KSID, customer folder, PN Name, output PN, and at least one required input PN.",
+      );
       return;
     }
     const recipe: AssemblyRecipe = {
       id: editingId ?? makeId("assembly-recipe"),
       name: name.trim(),
       outputLevel,
+      outputKsid: outputKsid.trim(),
+      division,
+      customer: customer.trim(),
+      pnName: pnName.trim(),
       outputPn: outputPn.trim(),
       outputRev: outputRev.trim(),
+      contact: contact.trim(),
+      assemblyTurnDays,
       requirements: cleanRequirements,
       createdAt:
         recipes.find((item) => item.id === editingId)?.createdAt ??
@@ -5039,8 +6035,14 @@ function AssemblyConfigurationsView({
     setEditingId(recipe.id);
     setName(recipe.name);
     setOutputLevel(recipe.outputLevel);
+    setOutputKsid(recipe.outputKsid);
+    setDivision(recipe.division);
+    setCustomer(recipe.customer);
+    setPnName(recipe.pnName);
     setOutputPn(recipe.outputPn);
     setOutputRev(recipe.outputRev);
+    setContact(recipe.contact);
+    setAssemblyTurnDays(recipe.assemblyTurnDays);
     setRequirements(recipe.requirements.map((item) => ({ ...item })));
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -5049,18 +6051,21 @@ function AssemblyConfigurationsView({
     <section className="view-stack assembly-config-view">
       <div className="view-intro">
         <div>
-          <h2>Assembly Configuration</h2>
+          <h2>Preset Mechanical Configs</h2>
           <p>
             Define how many PCBAs make one CCA and how many CCAs make one LRU.
-            Configurations are optional and remain available for future Project Families.
+            Each preset also stores the KSID-linked booking details used by New Project.
           </p>
         </div>
+        <button className="button secondary" onClick={onBack}>
+          <ChevronLeft size={16} /> Back to Settings
+        </button>
       </div>
       <form className="panel assembly-config-form" onSubmit={save}>
         <div className="assembly-config-heading">
           <div>
-            <p className="section-kicker">Many-to-one build recipe</p>
-            <h3>{editingId ? "Edit configuration" : "New configuration"}</h3>
+            <p className="section-kicker">Many-to-one build preset</p>
+            <h3>{editingId ? "Edit preset" : "New preset"}</h3>
           </div>
           {editingId && (
             <button type="button" className="button ghost small" onClick={() => clearForm(outputLevel)}>
@@ -5083,6 +6088,72 @@ function AssemblyConfigurationsView({
             </label>
           ))}
         </div>
+        <div className="assembly-preset-details">
+          <label>
+            Output KSID
+            <input
+              value={outputKsid}
+              onChange={(event) => setOutputKsid(event.target.value)}
+              onBlur={() => updateOutputKsid(outputKsid)}
+              placeholder="Enter KSID to auto-fill"
+            />
+          </label>
+          <label>
+            Business Section
+            <select
+              value={division}
+              onChange={(event) =>
+                setDivision(event.target.value as Division)
+              }
+            >
+              <option>Commercial</option>
+              <option>Aerospace</option>
+            </select>
+          </label>
+          <label>
+            Customer Sub-Category / Folder
+            <input
+              list={`mechanical-customer-options-${division.toLowerCase()}`}
+              value={customer}
+              onChange={(event) => setCustomer(event.target.value)}
+              placeholder="Search an existing folder or type a new customer"
+            />
+            <datalist
+              id={`mechanical-customer-options-${division.toLowerCase()}`}
+            >
+              {customerSuggestions.map((item) => (
+                <option key={item} value={item} />
+              ))}
+            </datalist>
+          </label>
+          <label>
+            PN Name
+            <input
+              value={pnName}
+              onChange={(event) => setPnName(event.target.value)}
+            />
+          </label>
+          <label>
+            Contact
+            <input
+              value={contact}
+              onChange={(event) => setContact(event.target.value)}
+            />
+          </label>
+          <label>
+            Mechanical Assembly Turn Time
+            <input
+              type="number"
+              min="0"
+              value={assemblyTurnDays}
+              onChange={(event) =>
+                setAssemblyTurnDays(
+                  Math.max(0, Number(event.target.value) || 0),
+                )
+              }
+            />
+          </label>
+        </div>
         <div className="assembly-output-grid">
           <label>
             Configuration Name
@@ -5100,7 +6171,9 @@ function AssemblyConfigurationsView({
         <div className="assembly-requirements-editor">
           <div className="assembly-requirements-title">
             <div>
-              <strong>Required {outputLevel === "CCA" ? "PCBAs" : "CCAs"}</strong>
+              <strong>
+                Required {outputLevel === "CCA" ? "PCBAs" : "CCAs / PCBAs"}
+              </strong>
               <small>Quantity is required for one finished {outputLevel}.</small>
             </div>
             <button
@@ -5112,6 +6185,8 @@ function AssemblyConfigurationsView({
                   {
                     id: makeId("requirement"),
                     inputLevel: outputLevel === "CCA" ? "PCBA" : "CCA",
+                    ksid: "",
+                    pnName: "",
                     pn: "",
                     rev: "",
                     quantityPerAssembly: 1,
@@ -5123,11 +6198,45 @@ function AssemblyConfigurationsView({
             </button>
           </div>
           <div className="assembly-requirement-head">
-            <span>Input level</span><span>Required PN#</span><span>Rev</span><span>QTY per {outputLevel}</span><span />
+            <span>Input level</span><span>Required KSID</span><span>PN Name</span><span>Required PN#</span><span>Rev</span><span>QTY per {outputLevel}</span><span />
           </div>
           {requirements.map((requirement) => (
             <div className="assembly-requirement-row" key={requirement.id}>
-              <strong>{outputLevel === "CCA" ? "PCBA" : "CCA"}</strong>
+              {outputLevel === "LRU" ? (
+                <select
+                  value={requirement.inputLevel}
+                  onChange={(event) =>
+                    updateRequirement(requirement.id, {
+                      inputLevel: event.target.value as "CCA" | "PCBA",
+                    })
+                  }
+                  aria-label="Required input level"
+                >
+                  <option value="CCA">CCA</option>
+                  <option value="PCBA">PCBA</option>
+                </select>
+              ) : (
+                <strong>PCBA</strong>
+              )}
+              <input
+                value={requirement.ksid}
+                onChange={(event) =>
+                  updateRequirement(requirement.id, { ksid: event.target.value })
+                }
+                onBlur={() =>
+                  updateRequirementKsid(requirement.id, requirement.ksid)
+                }
+                placeholder="KSID"
+              />
+              <input
+                value={requirement.pnName}
+                onChange={(event) =>
+                  updateRequirement(requirement.id, {
+                    pnName: event.target.value,
+                  })
+                }
+                placeholder="Component name"
+              />
               <input value={requirement.pn} onChange={(event) => updateRequirement(requirement.id, { pn: event.target.value })} placeholder="Part number" />
               <input value={requirement.rev} onChange={(event) => updateRequirement(requirement.id, { rev: event.target.value })} placeholder="Any" />
               <input className={requirement.quantityPerAssembly === "" ? "missing-input" : ""} type="text" inputMode="numeric" value={requirement.quantityPerAssembly} onChange={(event) => updateRequirement(requirement.id, { quantityPerAssembly: event.target.value === "" ? "" : Math.max(1, Number(event.target.value) || 1) })} />
@@ -5138,7 +6247,7 @@ function AssemblyConfigurationsView({
           ))}
         </div>
         <div className="modal-actions">
-          <button className="button primary"><Check size={16} /> Save configuration</button>
+          <button className="button primary"><Check size={16} /> Save preset</button>
         </div>
       </form>
       <div className="assembly-config-list">
@@ -5148,14 +6257,16 @@ function AssemblyConfigurationsView({
               <span className={`build-level-badge ${recipe.outputLevel.toLowerCase()}`}>{recipe.outputLevel}</span>
               <div>
                 <h3>{recipe.name}</h3>
-                <p>Output: {recipe.outputPn}{recipe.outputRev ? ` Rev ${recipe.outputRev}` : ""}</p>
+                <p>
+                  KSID {recipe.outputKsid || "—"} · {recipe.division} / {recipe.customer || "Unassigned"} · Output: {recipe.outputPn}{recipe.outputRev ? ` Rev ${recipe.outputRev}` : ""}
+                </p>
               </div>
               <div className="assembly-recipe-actions">
                 <button className="button secondary small" onClick={() => edit(recipe)}>Edit</button>
                 <button className="icon-button" aria-label={`Delete ${recipe.name}`} onClick={() => {
-                  if (!window.confirm(`Delete the ${recipe.name} configuration? Existing jobs will keep their saved input requirements.`)) return;
+                  if (!window.confirm(`Delete the ${recipe.name} preset? Existing jobs will keep their saved input requirements.`)) return;
                   onChange(recipes.filter((item) => item.id !== recipe.id));
-                  notify("Assembly configuration deleted.");
+                  notify("Mechanical preset deleted.");
                 }}><Trash2 size={16} /></button>
               </div>
             </header>
@@ -5184,11 +6295,13 @@ function NewJobModal({
   onCreate,
   recipes,
   jobs,
+  ksidProfiles,
 }: {
   onClose: () => void;
   onCreate: (job: Job | Job[]) => void;
   recipes: AssemblyRecipe[];
   jobs: Job[];
+  ksidProfiles: KsidProfile[];
 }) {
   const [division, setDivision] = useState<Division>("Commercial");
   const [polymerics, setPolymerics] = useState(false);
@@ -5492,6 +6605,8 @@ type LegacyImportRow = {
   id: string;
   sourceRow: number;
   division: "" | Division;
+  buildLevel: BuildLevel;
+  familyName: string;
   fields: JobDraft;
   booked: boolean;
 };
@@ -5690,6 +6805,8 @@ function legacyRowFromRecord(
       : /commercial/i.test(divisionValue)
         ? "Commercial"
         : "",
+    buildLevel: "PCBA",
+    familyName: "",
     fields,
     booked: false,
   };
@@ -6524,9 +7641,13 @@ async function parseShortageFile(file: File): Promise<ShortageItem[]> {
 function OldDataImportModal({
   onClose,
   onBook,
+  jobs,
+  ksidProfiles,
 }: {
   onClose: () => void;
   onBook: (job: Job) => void;
+  jobs: Job[];
+  ksidProfiles: KsidProfile[];
 }) {
   const [rows, setRows] = useState<LegacyImportRow[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -6539,6 +7660,36 @@ function OldDataImportModal({
   const needsInfoCount = rows.filter(
     (row) => !row.booked && (!row.division || legacyMissingFields(row).length),
   ).length;
+  const familySuggestions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          jobs
+            .map((job) => job.projectFamilyName?.trim())
+            .filter((name): name is string => Boolean(name)),
+        ),
+      ).sort((a, b) => a.localeCompare(b)),
+    [jobs],
+  );
+
+  function applyProfiles(imported: LegacyImportRow[]) {
+    return imported.map((row) => {
+      const profile = ksidProfileFor(row.fields.ksid, ksidProfiles);
+      if (!profile) return row;
+      return {
+        ...row,
+        division: profile.division,
+        fields: {
+          ...row.fields,
+          customer: profile.customer,
+          pnName: profile.pnName,
+          pn: profile.pn,
+          rev: profile.rev,
+          contact: profile.contact,
+        },
+      };
+    });
+  }
 
   async function importOldData(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -6574,7 +7725,7 @@ function OldDataImportModal({
           "No project rows were detected. Keep the headers visible and try a clearer image or Excel file.",
         );
       } else {
-        setRows(imported);
+        setRows(applyProfiles(imported));
         setActiveIndex(0);
         setScanState(
           `${imported.length} job${imported.length === 1 ? "" : "s"} detected. Review and confirm each booking.`,
@@ -6594,10 +7745,45 @@ function OldDataImportModal({
     value: JobDraft[Key],
   ) {
     setRows((allRows) =>
+      allRows.map((row, index) => {
+        if (index !== activeIndex) return row;
+        return {
+          ...row,
+          fields: {
+            ...row.fields,
+            [key]: value,
+          },
+        };
+      }),
+    );
+  }
+
+  function applyCurrentKsid() {
+    if (!current) return;
+    const value = current.fields.ksid;
+    const profile = ksidProfileFor(value, ksidProfiles);
+    setRows((allRows) =>
       allRows.map((row, index) =>
-        index === activeIndex
-          ? { ...row, fields: { ...row.fields, [key]: value } }
-          : row,
+        index !== activeIndex
+          ? row
+          : {
+              ...row,
+              division: profile?.division ?? row.division,
+              fields: {
+                ...row.fields,
+                ...(profile
+                  ? {
+                      customer: profile.customer,
+                      pnName: profile.pnName,
+                      pn: profile.pn,
+                      rev: profile.rev,
+                      contact: profile.contact,
+                    }
+                  : !value.trim()
+                    ? { customer: "", pnName: "", pn: "", rev: "", contact: "" }
+                    : {}),
+              },
+            },
       ),
     );
   }
@@ -6606,6 +7792,16 @@ function OldDataImportModal({
     setRows((allRows) =>
       allRows.map((row, index) =>
         index === activeIndex ? { ...row, division } : row,
+      ),
+    );
+  }
+
+  function updateCurrentClassification(
+    change: Partial<Pick<LegacyImportRow, "buildLevel" | "familyName">>,
+  ) {
+    setRows((allRows) =>
+      allRows.map((row, index) =>
+        index === activeIndex ? { ...row, ...change } : row,
       ),
     );
   }
@@ -6628,8 +7824,17 @@ function OldDataImportModal({
       return;
     }
     const fields = current.fields;
+    const familyName = current.familyName.trim();
+    const familyId = familyName
+      ? `old-family:${normalizeHeading(
+          `${current.division}:${fields.customer}:${familyName}`,
+        )}`
+      : undefined;
     const job: Job = {
       id: makeId("job"),
+      buildLevel: current.buildLevel,
+      familyId,
+      projectFamilyName: familyName,
       division: current.division as Division,
       customer: fields.customer.trim(),
       jobNumber: fields.jobNumber.trim(),
@@ -6647,7 +7852,18 @@ function OldDataImportModal({
       customerDueDate: fields.customerDueDate,
       poNumber: fields.poNumber.trim(),
       quoteNumber: fields.quoteNumber.trim(),
-      status: fields.status as JobStatus,
+      status:
+        current.buildLevel === "PCBA"
+          ? (fields.status as JobStatus)
+          : current.buildLevel === "CCA"
+            ? "Waiting for PCBA"
+            : "Waiting for CCAs",
+      assemblyRecipeId: "",
+      assemblyRequirements: [],
+      linkedJobIds: [],
+      completedQuantity: 0,
+      quantityReleases: [],
+      mechanicalShipments: [],
       specialProcesses: [],
       otherSpecialProcess: "",
       otherSpecialProcessTurnDays: 0,
@@ -6785,7 +8001,9 @@ function OldDataImportModal({
                   >
                     <small>Row {row.sourceRow}</small>
                     <strong>Job #{row.fields.jobNumber || "Missing"}</strong>
-                    <em>{row.booked ? "Booked" : rowMissing ? `${rowMissing} missing` : "Ready"}</em>
+                    <em>
+                      {row.buildLevel} · {row.booked ? "Booked" : rowMissing ? `${rowMissing} missing` : "Ready"}
+                    </em>
                   </button>
                 );
               })}
@@ -6836,6 +8054,60 @@ function OldDataImportModal({
                   ))}
                 </fieldset>
 
+                <fieldset
+                  className="legacy-mechanical-classification"
+                  disabled={current.booked}
+                >
+                  <legend>Mechanical Assembly Classification</legend>
+                  <div className="legacy-build-level-picker">
+                    {(["PCBA", "CCA", "LRU"] as BuildLevel[]).map((level) => (
+                      <label
+                        className={
+                          current.buildLevel === level ? "selected" : ""
+                        }
+                        key={level}
+                      >
+                        <input
+                          type="radio"
+                          checked={current.buildLevel === level}
+                          onChange={() =>
+                            updateCurrentClassification({ buildLevel: level })
+                          }
+                        />
+                        <strong>{level}</strong>
+                        <small>
+                          {level === "PCBA"
+                            ? "Board assembly"
+                            : level === "CCA"
+                              ? "CCA mechanical job"
+                              : "Final LRU assembly"}
+                        </small>
+                      </label>
+                    ))}
+                  </div>
+                  <label>
+                    Assign Project Family <span>(optional)</span>
+                    <input
+                      list="old-data-family-options"
+                      value={current.familyName}
+                      onChange={(event) =>
+                        updateCurrentClassification({
+                          familyName: event.target.value,
+                        })
+                      }
+                      placeholder="Select an existing family or type a new family name"
+                    />
+                    <datalist id="old-data-family-options">
+                      {familySuggestions.map((family) => (
+                        <option key={family} value={family} />
+                      ))}
+                    </datalist>
+                    <small>
+                      Jobs with the same family name, customer folder, and business section are linked together.
+                    </small>
+                  </label>
+                </fieldset>
+
                 <div className="job-form-grid legacy-job-grid">
                   <label className={`wide ${fieldClass("customer")}`}>
                     Customer Sub-Category / Folder {missingMark("customer")}
@@ -6847,7 +8119,7 @@ function OldDataImportModal({
                   </label>
                   <label className={fieldClass("ksid")}>
                     KSID {missingMark("ksid")}
-                    <input disabled={current.booked} value={current.fields.ksid} onChange={(event) => updateCurrentField("ksid", event.target.value)} />
+                    <input disabled={current.booked} value={current.fields.ksid} onChange={(event) => updateCurrentField("ksid", event.target.value)} onBlur={applyCurrentKsid} />
                   </label>
                   <label className={fieldClass("pnName")}>
                     PN Name {missingMark("pnName")}
@@ -6947,11 +8219,13 @@ function NewJobModal({
   onCreate,
   recipes,
   jobs,
+  ksidProfiles,
 }: {
   onClose: () => void;
   onCreate: (job: Job | Job[]) => void;
   recipes: AssemblyRecipe[];
   jobs: Job[];
+  ksidProfiles: KsidProfile[];
 }) {
   const [division, setDivision] = useState<Division>("Commercial");
   const [divisionMissing, setDivisionMissing] = useState(false);
@@ -6998,6 +8272,8 @@ function NewJobModal({
   const [mechanicalLevel, setMechanicalLevel] = useState<"CCA" | "LRU">("CCA");
   const [mechanicalRecipeId, setMechanicalRecipeId] = useState("");
   const [linkedJobIds, setLinkedJobIds] = useState<string[]>([]);
+  const [presetJobDrafts, setPresetJobDrafts] = useState<LinkedBuildDraft[]>([]);
+  const [presetReviewIndex, setPresetReviewIndex] = useState(0);
   const customerSuggestions = useMemo(
     () =>
       [...new Set(
@@ -7041,6 +8317,220 @@ function NewJobModal({
     });
   }
 
+  function updatePrimaryKsid(value: string) {
+    const profile = ksidProfileFor(value, ksidProfiles);
+    setField("ksid", value);
+    if (!value.trim()) {
+      setFields((current) => ({
+        ...current,
+        ksid: "",
+        customer: "",
+        pnName: "",
+        pn: "",
+        rev: "",
+        contact: "",
+      }));
+      setScanState("KSID cleared. The previously auto-filled project fields were cleared.");
+      return;
+    }
+    if (!profile) return;
+    setDivision(profile.division);
+    setDivisionMissing(false);
+    setFields((current) => ({
+      ...current,
+      ksid: value,
+      customer: profile.customer,
+      pnName: profile.pnName,
+      pn: profile.pn,
+      rev: profile.rev,
+      contact: profile.contact,
+    }));
+    setScanState(
+      `KSID matched. PN details and the most recent ${profile.division} customer folder were filled in; every field remains editable.`,
+    );
+  }
+
+  function applyMechanicalPreset(recipe: AssemblyRecipe) {
+    const generated: LinkedBuildDraft[] = [];
+    const seen = new Set<string>();
+    const inherited: JobDraft = {
+      ...fields,
+      customer: recipe.customer,
+      contact: recipe.contact,
+      customerDueDate: "",
+      poNumber: "",
+      quoteNumber: "",
+      createdDate: chicagoDateKey(),
+    };
+
+    function addPresetJob(
+      level: BuildLevel,
+      requirement: Pick<
+        AssemblyRequirement,
+        "ksid" | "pnName" | "pn" | "rev"
+      >,
+      matchedRecipe?: AssemblyRecipe,
+    ) {
+      const profile = ksidProfileFor(requirement.ksid, ksidProfiles);
+      const ksid = requirement.ksid || matchedRecipe?.outputKsid || profile?.ksid || "";
+      const pn = requirement.pn || matchedRecipe?.outputPn || profile?.pn || "";
+      const rev =
+        requirement.rev || matchedRecipe?.outputRev || profile?.rev || "";
+      const key = `${level}|${normalizeKsid(ksid) || pn.trim().toLowerCase()}|${rev
+        .trim()
+        .toLowerCase()}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+
+      const draft = linkedBuildDraft(level, inherited);
+      draft.recipeId = matchedRecipe?.id ?? "";
+      draft.fields = {
+        ...draft.fields,
+        customer: recipe.customer,
+        jobNumber: "",
+        ksid,
+        pnName:
+          requirement.pnName ||
+          matchedRecipe?.pnName ||
+          profile?.pnName ||
+          pn,
+        pn,
+        rev,
+        quantity: "",
+        projectType: level === "PCBA" ? "New" : "Assembly Only",
+        contact: recipe.contact,
+        poNumber: "",
+        quoteNumber: "",
+        status:
+          level === "PCBA"
+            ? "Waiting on Parts"
+            : level === "CCA"
+              ? "Waiting for PCBA"
+              : "Waiting for CCAs",
+        fabricationTurnDays: "0",
+        assemblyTurnDays: String(matchedRecipe?.assemblyTurnDays ?? 0),
+        smtDays: level === "PCBA" ? "1" : "1",
+      };
+      generated.push(draft);
+
+      matchedRecipe?.requirements.forEach((child) => {
+        const childRecipe = recipes.find(
+          (candidate) =>
+            candidate.outputLevel === child.inputLevel &&
+            ((child.ksid &&
+              normalizeKsid(candidate.outputKsid) ===
+                normalizeKsid(child.ksid)) ||
+              (!child.ksid &&
+                candidate.outputPn.trim().toLowerCase() ===
+                  child.pn.trim().toLowerCase() &&
+                (!child.rev ||
+                  candidate.outputRev.trim().toLowerCase() ===
+                    child.rev.trim().toLowerCase()))),
+        );
+        addPresetJob(child.inputLevel, child, childRecipe);
+      });
+    }
+
+    addPresetJob(
+      recipe.outputLevel,
+      {
+        ksid: recipe.outputKsid,
+        pnName: recipe.pnName,
+        pn: recipe.outputPn,
+        rev: recipe.outputRev,
+      },
+      recipe,
+    );
+
+    setPresetJobDrafts(generated);
+    setPresetReviewIndex(0);
+    setMechanicalBuild(false);
+    setAdditionalPcbas([]);
+    setIncludeMechanicalAssembly(false);
+    setCcaBuilds([]);
+    setIncludeLru(false);
+    setLruBuild(null);
+    setMechanicalLevel(recipe.outputLevel);
+    setMechanicalRecipeId(recipe.id);
+    setDivision(recipe.division);
+    setDivisionMissing(false);
+    setFields((current) => ({
+      ...current,
+      customer: recipe.customer,
+      ksid: recipe.outputKsid,
+      pnName: recipe.pnName,
+      pn: recipe.outputPn,
+      rev: recipe.outputRev,
+      projectType: "Assembly Only",
+      contact: recipe.contact,
+      status:
+        recipe.outputLevel === "CCA" ? "Waiting for PCBA" : "Waiting for CCAs",
+      createdDate: chicagoDateKey(),
+      fabricationTurnDays: "0",
+      assemblyTurnDays: String(recipe.assemblyTurnDays),
+      smtDays: "1",
+    }));
+    setLinkedJobIds([]);
+    setScanState(
+      `${recipe.name} generated ${generated.length} separate editable job entr${
+        generated.length === 1 ? "y" : "ies"
+      }. Enter Job# and QTY for each job; PO# and Quote# remain optional.`,
+    );
+  }
+
+  function updatePresetDraft(id: string, change: Partial<JobDraft>) {
+    setPresetJobDrafts((current) => {
+      const source = current.find((draft) => draft.id === id);
+      const isTopAssembly = current[0]?.id === id;
+      const sharedCustomer =
+        typeof change.customer === "string" ? change.customer : null;
+      const sharedContact =
+        typeof change.contact === "string" ? change.contact : null;
+      return current.map((draft) => ({
+        ...draft,
+        fields: {
+          ...draft.fields,
+          ...(draft.id === id ? change : {}),
+          ...(sharedCustomer !== null ? { customer: sharedCustomer } : {}),
+          ...(sharedContact !== null ? { contact: sharedContact } : {}),
+          ...(isTopAssembly &&
+          typeof change.poNumber === "string" &&
+          (draft.fields.poNumber === "" ||
+            draft.fields.poNumber === source?.fields.poNumber)
+            ? { poNumber: change.poNumber }
+            : {}),
+          ...(isTopAssembly &&
+          typeof change.quoteNumber === "string" &&
+          (draft.fields.quoteNumber === "" ||
+            draft.fields.quoteNumber === source?.fields.quoteNumber)
+            ? { quoteNumber: change.quoteNumber }
+            : {}),
+        },
+      }));
+    });
+  }
+
+  function applyPresetDraftKsid(id: string, value: string) {
+    const profile = ksidProfileFor(value, ksidProfiles);
+    updatePresetDraft(id, {
+      ksid: value,
+      ...(profile
+        ? {
+            pnName: profile.pnName,
+            pn: profile.pn,
+            rev: profile.rev,
+          }
+        : !value.trim()
+          ? { pnName: "", pn: "", rev: "" }
+          : {}),
+    });
+    if (profile) {
+      setScanState(
+        "KSID matched. PN Name, PN#, and Rev were filled in and remain editable.",
+      );
+    }
+  }
+
   function applyParsedFields(
     parsed: Partial<JobDraft> & {
       division?: Division;
@@ -7050,7 +8540,18 @@ function NewJobModal({
       otherProcess?: boolean;
     },
   ) {
+    const profile = ksidProfileFor(parsed.ksid ?? "", ksidProfiles);
     const parsedWithDefaults = {
+      ...(profile
+        ? {
+            division: profile.division,
+            customer: profile.customer,
+            pnName: profile.pnName,
+            pn: profile.pn,
+            rev: profile.rev,
+            contact: profile.contact,
+          }
+        : {}),
       ...parsed,
       status: parsed.status || "Waiting on Parts",
       createdDate: parsed.createdDate || chicagoDateKey(),
@@ -7342,6 +8843,111 @@ function NewJobModal({
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (presetJobDrafts.length) {
+      const requiredPresetFields: (keyof JobDraft)[] = [
+        "customer",
+        "jobNumber",
+        "ksid",
+        "pnName",
+        "pn",
+        "rev",
+        "quantity",
+        "contact",
+      ];
+      const incompleteIndex = presetJobDrafts.findIndex((draft) =>
+        requiredPresetFields.some(
+          (key) => !String(draft.fields[key] ?? "").trim(),
+        ),
+      );
+      if (incompleteIndex >= 0) {
+        setPresetReviewIndex(incompleteIndex);
+        setScanState(
+          `Complete the required fields for preset job ${
+            incompleteIndex + 1
+          } of ${presetJobDrafts.length}.`,
+        );
+        return;
+      }
+      const familyId = makeId("project-family");
+      const linkedIds = presetJobDrafts.map(() => makeId("job"));
+      const presetJobs = presetJobDrafts.map((draft, index): Job => {
+        const draftFields = draft.fields;
+        const recipe = recipes.find((item) => item.id === draft.recipeId);
+        const assemblyDays = Number(draftFields.assemblyTurnDays) || 0;
+        const fabricationDays =
+          draft.level === "PCBA"
+            ? Number(draftFields.fabricationTurnDays) || 0
+            : 0;
+        return normalizeJob({
+          id: linkedIds[index],
+          buildLevel: draft.level,
+          familyId,
+          projectFamilyName:
+            recipes.find((item) => item.id === mechanicalRecipeId)?.name ?? "",
+          linkedJobIds: linkedIds.filter((_, linkedIndex) => linkedIndex !== index),
+          assemblyRecipeId: recipe?.id ?? "",
+          assemblyRequirements:
+            recipe?.requirements.map((item) => ({
+              ...item,
+              id: makeId("job-requirement"),
+            })) ?? [],
+          division,
+          customer: draftFields.customer,
+          jobNumber: draftFields.jobNumber,
+          ksid: draftFields.ksid,
+          pnName: draftFields.pnName,
+          pn: draftFields.pn,
+          rev: draftFields.rev,
+          quantity: draftFields.quantity,
+          projectType:
+            (draftFields.projectType as ProjectType) ||
+            (draft.level === "PCBA" ? "New" : "Assembly Only"),
+          contact: draftFields.contact,
+          dueDate: addBusinessDays(
+            draftFields.createdDate || chicagoDateKey(),
+            fabricationDays + assemblyDays,
+          ),
+          customerDueDate: draftFields.customerDueDate,
+          poNumber: draftFields.poNumber,
+          quoteNumber: draftFields.quoteNumber,
+          status:
+            (draftFields.status as JobStatus) ||
+            (draft.level === "PCBA"
+              ? "Waiting on Parts"
+              : draft.level === "CCA"
+                ? "Waiting for PCBA"
+                : "Waiting for CCAs"),
+          specialProcesses: [],
+          otherSpecialProcess: "",
+          otherSpecialProcessTurnDays: 0,
+          polymericsOptions: [],
+          createdDate: draftFields.createdDate || chicagoDateKey(),
+          fabricationDockDate: "",
+          pcbDockDate: "",
+          pcbArrived: false,
+          fabricationTurnDays: fabricationDays,
+          assemblyTurnDays: assemblyDays,
+          polymericsTurnDays: 0,
+          externalTestingTurnDays: 0,
+          allPartsReceivedDate: "",
+          noShortageList: false,
+          acceptedPartials: false,
+          partialDeliveries: [],
+          smtDays:
+            draft.level === "PCBA"
+              ? Math.max(1, Number(draftFields.smtDays) || 1)
+              : 0,
+          workflowCompleted: ["project-creation"],
+          completedQuantity: 0,
+          quantityReleases: [],
+          mechanicalShipments: [],
+          shortages: [],
+          notes: [],
+        });
+      });
+      onCreate(presetJobs);
+      return;
+    }
     const required = requiredDraftFields.filter(
       (key) => !mechanicalBuild || !["fabricationTurnDays", "smtDays"].includes(key),
     );
@@ -7365,21 +8971,34 @@ function NewJobModal({
         return;
       }
       const linked = jobs.filter((job) => linkedJobIds.includes(job.id));
-      const assemblyRequirements = Array.from(
-        linked.reduce((requirements, linkedJob) => {
-          const key = `${linkedJob.pn.trim().toLowerCase()}|${linkedJob.rev.trim().toLowerCase()}`;
-          if (!requirements.has(key)) {
-            requirements.set(key, {
-              id: makeId("job-requirement"),
-              inputLevel: mechanicalLevel === "CCA" ? "PCBA" as BuildLevel : "CCA" as BuildLevel,
-              pn: linkedJob.pn,
-              rev: linkedJob.rev,
-              quantityPerAssembly: 1,
-            });
-          }
-          return requirements;
-        }, new Map<string, AssemblyRequirement>()).values(),
+      const selectedRecipe = recipes.find(
+        (recipe) => recipe.id === mechanicalRecipeId,
       );
+      const assemblyRequirements = selectedRecipe
+        ? selectedRecipe.requirements.map((requirement) => ({
+            ...requirement,
+            id: makeId("job-requirement"),
+          }))
+        : Array.from(
+            linked.reduce((requirements, linkedJob) => {
+              const key = `${linkedJob.pn.trim().toLowerCase()}|${linkedJob.rev.trim().toLowerCase()}`;
+              if (!requirements.has(key)) {
+                requirements.set(key, {
+                  id: makeId("job-requirement"),
+                  inputLevel:
+                    mechanicalLevel === "CCA"
+                      ? ("PCBA" as BuildLevel)
+                      : ("CCA" as BuildLevel),
+                  ksid: linkedJob.ksid,
+                  pnName: linkedJob.pnName,
+                  pn: linkedJob.pn,
+                  rev: linkedJob.rev,
+                  quantityPerAssembly: 1,
+                });
+              }
+              return requirements;
+            }, new Map<string, AssemblyRequirement>()).values(),
+          );
       const readyDate = linked
         .flatMap((job) => job.quantityReleases ?? [])
         .map((release) => release.date)
@@ -7391,7 +9010,7 @@ function NewJobModal({
         buildLevel: mechanicalLevel,
         familyId: makeId("mechanical-link"),
         linkedJobIds,
-        assemblyRecipeId: "",
+        assemblyRecipeId: selectedRecipe?.id ?? "",
         assemblyRequirements,
         division,
         customer: fields.customer,
@@ -7634,6 +9253,31 @@ function NewJobModal({
     }
   }
 
+  function updateDraftKsid(draft: LinkedBuildDraft, value: string) {
+    const profile = ksidProfileFor(value, ksidProfiles);
+    updateDraft(
+      draft,
+      {},
+      {
+        ksid: value,
+        ...(profile
+          ? {
+              customer: profile.customer,
+              pnName: profile.pnName,
+              pn: profile.pn,
+              rev: profile.rev,
+              contact: profile.contact,
+            }
+          : {}),
+      },
+    );
+    if (profile) {
+      setScanState(
+        `KSID matched for ${draft.level}. Its PN details and recent customer folder were filled in and remain editable.`,
+      );
+    }
+  }
+
   function selectDraftRecipe(draft: LinkedBuildDraft, recipeId: string) {
     const recipe = recipes.find((item) => item.id === recipeId);
     updateDraft(
@@ -7673,7 +9317,9 @@ function NewJobModal({
       onMouseDown={(event) => event.target === event.currentTarget && onClose()}
     >
       <form
-        className={`modal-card new-job-modal enhanced-job-form ${mechanicalBuild ? "mechanical-mode" : ""}`}
+        className={`modal-card new-job-modal enhanced-job-form ${
+          mechanicalBuild ? "mechanical-mode" : ""
+        } ${presetJobDrafts.length ? "preset-family-mode" : ""}`}
         onSubmit={submit}
         noValidate
       >
@@ -7722,6 +9368,168 @@ function NewJobModal({
             onChange={importProject}
           />
         </div>
+        <section className="mechanical-preset-picker">
+          <div>
+            <strong>Preset Mechanical Config</strong>
+            <small>
+              Applies all saved booking details except Job#, QTY, PO#, and Quote#.
+            </small>
+          </div>
+          <label className="mechanical-preset-dropdown">
+            <span className="sr-only">Select Preset Mechanical Config</span>
+            <select
+              value={mechanicalRecipeId}
+              onChange={(event) => {
+                const recipe = recipes.find(
+                  (item) => item.id === event.target.value,
+                );
+                if (recipe) applyMechanicalPreset(recipe);
+                else {
+                  setMechanicalRecipeId("");
+                  setPresetJobDrafts([]);
+                }
+              }}
+            >
+              <option value="">Select a preset configuration…</option>
+              {recipes.map((recipe) => (
+                <option key={recipe.id} value={recipe.id}>
+                  {recipe.outputLevel} · {recipe.name}
+                </option>
+              ))}
+            </select>
+            {!recipes.length && (
+              <small>No presets saved. Add one under Settings → Preset Mechanical Configs.</small>
+            )}
+          </label>
+        </section>
+        {presetJobDrafts.length > 0 && (
+          <section className="preset-family-review">
+            <div className="preset-family-review-heading">
+              <div>
+                <p className="section-kicker">Preset project family</p>
+                <h3>
+                  Review {presetJobDrafts.length} separate job entr
+                  {presetJobDrafts.length === 1 ? "y" : "ies"}
+                </h3>
+                <p>
+                  Customer folder, business section, and contact stay shared
+                  across the family. Every field remains editable.
+                </p>
+              </div>
+              <label>
+                Business Section
+                <select
+                  value={division}
+                  onChange={(event) =>
+                    setDivision(event.target.value as Division)
+                  }
+                >
+                  <option>Commercial</option>
+                  <option>Aerospace</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                className="button ghost small"
+                onClick={() => {
+                  setPresetJobDrafts([]);
+                  setPresetReviewIndex(0);
+                  setMechanicalRecipeId("");
+                  setScanState("");
+                }}
+              >
+                Clear preset
+              </button>
+            </div>
+            {presetJobDrafts[presetReviewIndex] && (
+              <LinkedBuildDraftCard
+                draft={presetJobDrafts[presetReviewIndex]}
+                index={presetReviewIndex}
+                recipes={recipes}
+                onUpdate={(change) =>
+                  updatePresetDraft(
+                    presetJobDrafts[presetReviewIndex].id,
+                    change,
+                  )
+                }
+                onRecipe={(recipeId) =>
+                  setPresetJobDrafts((current) =>
+                    current.map((draft) =>
+                      draft.id === presetJobDrafts[presetReviewIndex].id
+                        ? { ...draft, recipeId }
+                        : draft,
+                    ),
+                  )
+                }
+                onKsid={(value) =>
+                  updatePresetDraft(
+                    presetJobDrafts[presetReviewIndex].id,
+                    { ksid: value },
+                  )
+                }
+                onKsidBlur={() =>
+                  applyPresetDraftKsid(
+                    presetJobDrafts[presetReviewIndex].id,
+                    presetJobDrafts[presetReviewIndex].fields.ksid,
+                  )
+                }
+                onCopyFamily={() => {
+                  const top = presetJobDrafts[0]?.fields;
+                  if (!top) return;
+                  updatePresetDraft(presetJobDrafts[presetReviewIndex].id, {
+                    customer: top.customer,
+                    contact: top.contact,
+                    customerDueDate: top.customerDueDate,
+                    createdDate: top.createdDate,
+                  });
+                }}
+                onRemove={() => {
+                  const currentId = presetJobDrafts[presetReviewIndex].id;
+                  setPresetJobDrafts((current) =>
+                    current.filter((draft) => draft.id !== currentId),
+                  );
+                  setPresetReviewIndex((current) =>
+                    Math.max(
+                      0,
+                      Math.min(current, presetJobDrafts.length - 2),
+                    ),
+                  );
+                }}
+              />
+            )}
+            <div className="legacy-review-actions preset-review-actions">
+              <button
+                type="button"
+                className="button secondary"
+                disabled={presetReviewIndex === 0}
+                onClick={() =>
+                  setPresetReviewIndex((current) => Math.max(0, current - 1))
+                }
+              >
+                <ChevronLeft size={17} /> Previous job
+              </button>
+              <span>
+                <strong>{presetReviewIndex + 1}</strong> /{" "}
+                {presetJobDrafts.length}
+              </span>
+              <button
+                type="button"
+                className="button secondary"
+                disabled={presetReviewIndex === presetJobDrafts.length - 1}
+                onClick={() =>
+                  setPresetReviewIndex((current) =>
+                    Math.min(presetJobDrafts.length - 1, current + 1),
+                  )
+                }
+              >
+                Next job <ChevronRight size={17} />
+              </button>
+              <button className="button primary">
+                <Plus size={16} /> Create {presetJobDrafts.length} Jobs
+              </button>
+            </div>
+          </section>
+        )}
         <fieldset
           className={`division-picker ${divisionMissing ? "missing-field" : ""}`}
         >
@@ -7835,6 +9643,7 @@ function NewJobModal({
             <input
               value={fields.ksid}
               onChange={(event) => setField("ksid", event.target.value)}
+              onBlur={() => updatePrimaryKsid(fields.ksid)}
             />
           </label>
           <label className={`wide ${fieldClass("pnName")}`}>
@@ -8162,6 +9971,8 @@ function NewJobModal({
               recipes={recipes}
               onUpdate={(fieldChange) => updateDraft(draft, {}, fieldChange)}
               onRecipe={(recipeId) => selectDraftRecipe(draft, recipeId)}
+              onKsid={(value) => updateDraft(draft, {}, { ksid: value })}
+              onKsidBlur={() => updateDraftKsid(draft, draft.fields.ksid)}
               onCopyFamily={() => copyFamilyDefaults(draft)}
               onRemove={() =>
                 setAdditionalPcbas((current) =>
@@ -8209,6 +10020,8 @@ function NewJobModal({
                   recipes={recipes}
                   onUpdate={(fieldChange) => updateDraft(draft, {}, fieldChange)}
                   onRecipe={(recipeId) => selectDraftRecipe(draft, recipeId)}
+                  onKsid={(value) => updateDraft(draft, {}, { ksid: value })}
+                  onKsidBlur={() => updateDraftKsid(draft, draft.fields.ksid)}
                   onCopyFamily={() => copyFamilyDefaults(draft)}
                   onRemove={() =>
                     setCcaBuilds((current) =>
@@ -8240,6 +10053,8 @@ function NewJobModal({
                   recipes={recipes}
                   onUpdate={(fieldChange) => updateDraft(lruBuild, {}, fieldChange)}
                   onRecipe={(recipeId) => selectDraftRecipe(lruBuild, recipeId)}
+                  onKsid={(value) => updateDraft(lruBuild, {}, { ksid: value })}
+                  onKsidBlur={() => updateDraftKsid(lruBuild, lruBuild.fields.ksid)}
                   onCopyFamily={() => copyFamilyDefaults(lruBuild)}
                   onRemove={() => {
                     setIncludeLru(false);
@@ -8277,6 +10092,8 @@ function LinkedBuildDraftCard({
   recipes,
   onUpdate,
   onRecipe,
+  onKsid,
+  onKsidBlur,
   onCopyFamily,
   onRemove,
 }: {
@@ -8285,6 +10102,8 @@ function LinkedBuildDraftCard({
   recipes: AssemblyRecipe[];
   onUpdate: (change: Partial<JobDraft>) => void;
   onRecipe: (recipeId: string) => void;
+  onKsid: (value: string) => void;
+  onKsidBlur: () => void;
   onCopyFamily: () => void;
   onRemove: () => void;
 }) {
@@ -8364,7 +10183,11 @@ function LinkedBuildDraftCard({
         </label>
         <label className={required("ksid")}>
           KSID
-          <input value={draft.fields.ksid} onChange={(event) => set("ksid", event.target.value)} />
+          <input
+            value={draft.fields.ksid}
+            onChange={(event) => onKsid(event.target.value)}
+            onBlur={onKsidBlur}
+          />
         </label>
         <label className={`wide ${required("pnName")}`}>
           PN Name
@@ -8467,16 +10290,19 @@ function JobDrawer({
   const shortageUploadRef = useRef<HTMLInputElement>(null);
   const shortageDue = addBusinessDays(job.createdDate, 3);
   const buildLevel = jobBuildLevel(job);
-  const familyJobs = jobs.filter(
-    (candidate) =>
-      candidate.id === job.id ||
-      job.linkedJobIds?.includes(candidate.id) ||
-      candidate.linkedJobIds?.includes(job.id),
+  const familyJobs = [
+    job,
+    ...linkedJobsFor(job, jobs),
+  ].filter(
+    (candidate, index, all) =>
+      all.findIndex((item) => item.id === candidate.id) === index,
   );
   const linkedMechanicalJobs = jobs.filter(
-    (candidate) => candidate.linkedJobIds?.includes(job.id),
+    (candidate) =>
+      jobBuildLevel(candidate) !== "PCBA" &&
+      linkedJobsFor(candidate, jobs).some((input) => input.id === job.id),
   );
-  const requirementProgress = assemblyRequirementProgress(job, linkedJobsFor(job, jobs));
+  const requirementProgress = assemblyRequirementProgress(job, jobs);
   const assemblyRecipe = recipes.find((recipe) => recipe.id === job.assemblyRecipeId);
   const buildableQuantity = buildableAssemblyQuantity(job, jobs);
   const scheduledQuantity = (job.mechanicalShipments ?? []).reduce((sum, batch) => sum + Number(batch.quantity || 0), 0);
@@ -9372,6 +11198,9 @@ function JobDrawer({
                     <div className={item.complete ? "complete" : "waiting"} key={item.requirement.id}>
                       <span>{item.requirement.inputLevel} {item.requirement.pn}{item.requirement.rev ? ` Rev ${item.requirement.rev}` : ""}</span>
                       <strong>{item.available} / {item.required}</strong>
+                      <small>
+                        {item.totalAvailable} completed · {item.allocatedElsewhere} reserved by other jobs
+                      </small>
                       {item.complete ? <CheckCircle2 size={16} /> : <Clock3 size={16} />}
                     </div>
                   ))}
@@ -9477,7 +11306,7 @@ function JobDrawer({
                         />
                       </label>
                       <div>
-                        <small>Completed and available</small>
+                        <small>Available for this job</small>
                         <strong>{item.available}</strong>
                       </div>
                     </div>
@@ -9489,6 +11318,50 @@ function JobDrawer({
                     <span><small>Currently buildable</small><strong>{buildableQuantity} {buildLevel}{buildableQuantity === 1 ? "" : "s"}</strong></span>
                     <span><small>Scheduled</small><strong>{scheduledQuantity}</strong></span>
                     <span><small>Completed / shipped</small><strong>{completedShipmentQuantity}</strong></span>
+                  </div>
+                  <div className="shared-input-crosscheck">
+                    {requirementProgress.map((item) => (
+                      <div
+                        className={item.complete ? "supported" : "unsupported"}
+                        key={`crosscheck-${item.requirement.id}`}
+                      >
+                        <span>
+                          {item.complete ? (
+                            <CheckCircle2 size={17} />
+                          ) : (
+                            <AlertTriangle size={17} />
+                          )}
+                          <strong>
+                            {item.complete
+                              ? "Configuration quantity supported"
+                              : `Not enough ${item.requirement.inputLevel} quantity`}
+                          </strong>
+                        </span>
+                        <div>
+                          <span>
+                            <small>Completed supply</small>
+                            <strong>{item.totalAvailable}</strong>
+                          </span>
+                          <span>
+                            <small>Other linked jobs</small>
+                            <strong>{item.allocatedElsewhere}</strong>
+                          </span>
+                          <span>
+                            <small>This job requires</small>
+                            <strong>{item.required}</strong>
+                          </span>
+                          <span>
+                            <small>Remaining after all jobs</small>
+                            <strong>{item.remainingAfterAll}</strong>
+                          </span>
+                        </div>
+                        {!item.complete && (
+                          <small>
+                            Short by {item.shortage} {item.requirement.inputLevel} for the planned QTY {job.quantity || "0"}.
+                          </small>
+                        )}
+                      </div>
+                    ))}
                   </div>
                 </div>
                 <div className="shipment-schedule-title">
@@ -9980,6 +11853,50 @@ function JobDrawer({
                 <Plus size={15} /> Add note
               </button>
             </form>
+            <div className="job-follow-up-controls">
+              <div>
+                <strong>Action Item Follow-Up Schedule</strong>
+                <small>
+                  Classify this job so its action items return to the main list
+                  every Monday or every three days.
+                </small>
+              </div>
+              {(["weekly", "three-day"] as FollowUpCadence[]).map((mode) => {
+                const selected = job.followUpCadence === mode;
+                return (
+                  <button
+                    type="button"
+                    className={`button small ${selected ? "primary" : "secondary"}`}
+                    aria-pressed={selected}
+                    key={mode}
+                    onClick={() => {
+                      if (selected) {
+                        onUpdate({
+                          followUpCadence: "",
+                          actionDeferralMode: "",
+                          actionDeferredUntil: "",
+                        });
+                        notify("Recurring follow-up classification removed.");
+                        return;
+                      }
+                      const until = followUpDate(mode);
+                      onUpdate({
+                        followUpCadence: mode,
+                        actionDeferralMode: mode,
+                        actionDeferredUntil: until,
+                      });
+                      notify(
+                        mode === "weekly"
+                          ? `Weekly Follow-Up enabled. Current action items return Monday, ${dateLabel(until)}.`
+                          : `3-Day Follow-Up enabled. Current action items return ${dateLabel(until)}.`,
+                      );
+                    }}
+                  >
+                    {mode === "weekly" ? "Weekly Follow Ups" : "3 Day Follow Up"}
+                  </button>
+                );
+              })}
+            </div>
             <div className="drawer-note-history">
               {[...job.notes]
                 .sort((a, b) =>

@@ -18,8 +18,16 @@ LOCAL AND OFFLINE DATA
 RFQ FOLDER CREATION
 - In Quotes, use Create RFQ Folder for Commercial to create under Q:\Customer RFQs.
 - Use Create RFQ Folder for Aerospace to create under P:\RFQs.
+- Select the existing customer folder inside the correct RFQ location first.
 - Each new RFQ folder contains Customer Data and Customer Request subfolders.
 - The new folder opens automatically in Windows Explorer.
+
+VERSION 61 WORKFLOWS
+- Manufacturing customer groups can be organized in collapsible folders without deleting their jobs.
+- Mechanical Config presets support KSID-based LRU, CCA, and PCBA job families.
+- Preset-generated jobs remain individually editable before creation.
+- Action Items support recurring Weekly or 3-Day classifications and one-time deferrals.
+- Follow-Up Later sections are collapsible, and Return to Main List clears the selected deferral or recurring classification.
 
 PHOTO SCANNING
 - OCR worker, engine, and English recognition data are included inside the application.
