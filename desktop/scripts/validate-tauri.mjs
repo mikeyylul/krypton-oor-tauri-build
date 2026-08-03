@@ -89,12 +89,17 @@ for (const fragment of [
   "collapsible-follow-up-section",
   "Weekly Follow-Up",
   "3-Day Follow-Up",
+  "Job Excel Format",
+  "selectedJobExcelIds",
+  "meetingNotesStorageKey",
+  "Meeting Notes",
+  "meetingNotesHydrated",
 ]) {
   if (!desktopSource.includes(fragment)) {
-    throw new Error(`Missing Version 61 workflow behavior: ${fragment}`);
+    throw new Error(`Missing Version 63 workflow behavior: ${fragment}`);
   }
 }
 
 console.log(
-  "Validated Website Version 61 parity, native RFQ folder creation, local autosave identity, packaged photo OCR, and Tauri offline restrictions.",
+  "Validated Website Version 63 parity, native RFQ folder creation, local autosave identity, packaged photo OCR, and Tauri offline restrictions.",
 );

@@ -275,6 +275,18 @@ type WeeklyActionsState = {
   current: WeeklyWorkWeek;
   archives: WeeklyWorkWeek[];
 };
+type MeetingNote = {
+  id: string;
+  date: string;
+  division: Division;
+  customer: string;
+  text: string;
+  createdAt: string;
+};
+type MeetingCustomerOption = {
+  division: Division;
+  customer: string;
+};
 
 const projectTypes: ProjectType[] = [
   "New",
@@ -330,6 +342,7 @@ const rfqTags: RFQTag[] = [
 const storageKey = "projectflow-manufacturing-v3";
 const quotesStorageKey = "krypton-oor-quotes-v1";
 const weeklyActionsStorageKey = "krypton-oor-weekly-actions-v1";
+const meetingNotesStorageKey = "krypton-oor-meeting-notes-v1";
 
 type DesktopBridgeWindow = Window & {
   __TAURI_INTERNALS__?: {
@@ -530,6 +543,22 @@ function updateWeeklyActionsWeek(
       .sort((a, b) => b.weekStart.localeCompare(a.weekStart))
       .slice(0, 104),
   };
+}
+
+function normalizeMeetingNotes(saved: unknown): MeetingNote[] {
+  if (!Array.isArray(saved)) return [];
+  return saved
+    .filter((note): note is Partial<MeetingNote> => Boolean(note && typeof note === "object"))
+    .map((note) => ({
+      id: typeof note.id === "string" && note.id ? note.id : makeId("meeting-note"),
+      date: typeof note.date === "string" ? note.date : chicagoDateKey(),
+      division: note.division === "Aerospace" ? "Aerospace" : "Commercial",
+      customer: typeof note.customer === "string" ? note.customer : "",
+      text: typeof note.text === "string" ? note.text : "",
+      createdAt:
+        typeof note.createdAt === "string" ? note.createdAt : new Date().toISOString(),
+    }))
+    .filter((note) => note.customer && note.text);
 }
 
 function effectiveDueDate(job: Job) {
@@ -1671,6 +1700,8 @@ export default function Home() {
     archives: [],
   }));
   const [weeklyActionsHydrated, setWeeklyActionsHydrated] = useState(false);
+  const [meetingNotes, setMeetingNotes] = useState<MeetingNote[]>([]);
+  const [meetingNotesHydrated, setMeetingNotesHydrated] = useState(false);
   const [assemblyRecipes, setAssemblyRecipes] = useState<AssemblyRecipe[]>([]);
   const [assemblyRecipesHydrated, setAssemblyRecipesHydrated] = useState(false);
   const [customerOrganizationFolders, setCustomerOrganizationFolders] =
@@ -1730,6 +1761,21 @@ export default function Home() {
     const frame = requestAnimationFrame(() => {
       setWeeklyActions(normalizeWeeklyActions(saved));
       setWeeklyActionsHydrated(true);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
+  useEffect(() => {
+    let saved: unknown = [];
+    try {
+      const raw = window.localStorage.getItem(meetingNotesStorageKey);
+      if (raw) saved = JSON.parse(raw);
+    } catch {
+      window.localStorage.removeItem(meetingNotesStorageKey);
+    }
+    const frame = requestAnimationFrame(() => {
+      setMeetingNotes(normalizeMeetingNotes(saved));
+      setMeetingNotesHydrated(true);
     });
     return () => cancelAnimationFrame(frame);
   }, []);
@@ -1835,6 +1881,19 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    function syncMeetingNotes(event: StorageEvent) {
+      if (event.key !== meetingNotesStorageKey || !event.newValue) return;
+      try {
+        setMeetingNotes(normalizeMeetingNotes(JSON.parse(event.newValue)));
+      } catch {
+        // Ignore an incomplete write from another tab.
+      }
+    }
+    window.addEventListener("storage", syncMeetingNotes);
+    return () => window.removeEventListener("storage", syncMeetingNotes);
+  }, []);
+
+  useEffect(() => {
     if (hydrated) window.localStorage.setItem(storageKey, JSON.stringify(jobs));
   }, [hydrated, jobs]);
   useEffect(() => {
@@ -1850,6 +1909,14 @@ export default function Home() {
       );
     }
   }, [weeklyActions, weeklyActionsHydrated]);
+  useEffect(() => {
+    if (meetingNotesHydrated) {
+      window.localStorage.setItem(
+        meetingNotesStorageKey,
+        JSON.stringify(meetingNotes),
+      );
+    }
+  }, [meetingNotes, meetingNotesHydrated]);
 
   useEffect(() => {
     if (assemblyRecipesHydrated) {
@@ -1930,6 +1997,22 @@ export default function Home() {
       }) satisfies Record<Division, string[]>,
     [jobs],
   );
+  const meetingCustomerOptions = useMemo(() => {
+    const options = new Map<string, MeetingCustomerOption>();
+    [...jobs, ...quotes].forEach((record) => {
+      const customer = record.customer.trim();
+      if (!customer) return;
+      options.set(`${record.division}:${customer}`, {
+        division: record.division,
+        customer,
+      });
+    });
+    return [...options.values()].sort(
+      (a, b) =>
+        a.division.localeCompare(b.division) ||
+        a.customer.localeCompare(b.customer),
+    );
+  }, [jobs, quotes]);
   const ksidProfiles = useMemo(
     () => buildKsidProfiles(jobs, quotes),
     [jobs, quotes],
@@ -2380,6 +2463,11 @@ export default function Home() {
         "Record ID": weeklyActions.current.weekStart,
         Payload: JSON.stringify(weeklyActions),
       },
+      {
+        "Record Type": "Meeting Notes",
+        "Record ID": "All Meeting Notes",
+        Payload: JSON.stringify(meetingNotes),
+      },
     ];
     const backupSheet = XLSX.utils.json_to_sheet(backupRows);
     backupSheet["!cols"] = [{ wch: 20 }, { wch: 28 }, { wch: 100 }];
@@ -2393,6 +2481,7 @@ export default function Home() {
       ["Assembly Configurations", assemblyRecipes.length],
       ["Customer Organization Folders", customerOrganizationFolders.length],
       ["Weekly Action Archives", weeklyActions.archives.length],
+      ["Meeting Notes", meetingNotes.length],
       [],
       [
         "Important",
@@ -2450,8 +2539,12 @@ export default function Home() {
       const importedWeekly = weeklyRow
         ? normalizeWeeklyActions(JSON.parse(weeklyRow.payload) as WeeklyActionsState)
         : normalizeWeeklyActions(null);
+      const meetingNotesRow = parsed.find((row) => row.type === "Meeting Notes");
+      const importedMeetingNotes = meetingNotesRow
+        ? normalizeMeetingNotes(JSON.parse(meetingNotesRow.payload))
+        : [];
       const approved = window.confirm(
-        `Import ${importedJobs.length} jobs, ${importedQuotes.length} quotes, ${importedRecipes.length} assembly configurations, and ${importedOrganizationFolders.length} organization folders from ${file.name}?\n\nThis will replace the jobs, quotes, configurations, organization folders, and Weekly Actions currently stored on this computer.`,
+        `Import ${importedJobs.length} jobs, ${importedQuotes.length} quotes, ${importedRecipes.length} assembly configurations, ${importedOrganizationFolders.length} organization folders, and ${importedMeetingNotes.length} meeting notes from ${file.name}?\n\nThis will replace the jobs, quotes, configurations, organization folders, Weekly Actions, and Meeting Notes currently stored on this computer.`,
       );
       if (!approved) {
         notify("Backup import canceled. No data was changed.");
@@ -2462,11 +2555,12 @@ export default function Home() {
       setAssemblyRecipes(importedRecipes);
       setCustomerOrganizationFolders(importedOrganizationFolders);
       setWeeklyActions(importedWeekly);
+      setMeetingNotes(importedMeetingNotes);
       setSelectedJobId(null);
       setSelectedQuoteId(null);
       setShowNewJob(false);
       notify(
-        `Backup restored: ${importedJobs.length} jobs, ${importedQuotes.length} quotes, ${importedRecipes.length} assembly configurations, and ${importedOrganizationFolders.length} organization folders.`,
+        `Backup restored: ${importedJobs.length} jobs, ${importedQuotes.length} quotes, ${importedRecipes.length} assembly configurations, ${importedOrganizationFolders.length} organization folders, and ${importedMeetingNotes.length} meeting notes.`,
       );
     } catch {
       notify("This file is not a valid Krypton Solutions OOR complete backup.");
@@ -2910,6 +3004,10 @@ export default function Home() {
       <WeeklyNotepad
         state={weeklyActions}
         onChange={setWeeklyActions}
+        meetingNotes={meetingNotes}
+        onMeetingNotesChange={setMeetingNotes}
+        customers={meetingCustomerOptions}
+        preferredCustomer={selectedCustomer}
       />
     </div>
   );
@@ -3085,7 +3183,105 @@ function DivisionView({
 }) {
   const [folderStatus, setFolderStatus] = useState<"All" | JobStatus>("All");
   const [jobSearch, setJobSearch] = useState("");
+  const [showJobExcelFormat, setShowJobExcelFormat] = useState(false);
+  const [selectedJobExcelIds, setSelectedJobExcelIds] = useState<string[]>([]);
   const divisionJobs = folders.flatMap(([, items]) => items);
+  const customerJobs = customer
+    ? jobs.filter((job) => job.customer === customer)
+    : [];
+
+  function openJobExcelFormat() {
+    if (!customer) {
+      notify("Select a customer sub-category before using Job Excel Format.");
+      return;
+    }
+    if (!customerJobs.length) {
+      notify(`There are no jobs in ${customer} to copy.`);
+      return;
+    }
+    setSelectedJobExcelIds(customerJobs.map((job) => job.id));
+    setShowJobExcelFormat(true);
+  }
+
+  async function copyJobExcelFormat() {
+    const selectedJobs = customerJobs
+      .filter((job) => selectedJobExcelIds.includes(job.id))
+      .sort((a, b) =>
+        a.jobNumber.localeCompare(b.jobNumber, undefined, { numeric: true }),
+      );
+    if (!selectedJobs.length) {
+      notify("Select at least one job to copy.");
+      return;
+    }
+    const rows = selectedJobs.map((job) => {
+      const latestNote = [...job.notes].sort((a, b) =>
+        `${b.date}${b.createdAt}`.localeCompare(`${a.date}${a.createdAt}`),
+      )[0];
+      return {
+        "Job#": job.jobNumber,
+        KSID: job.ksid,
+        "PN Name": job.pnName,
+        "PN#": job.pn,
+        REV: job.rev,
+        "Level/Type": job.buildLevel || job.projectType,
+        "Due Date": dateLabel(effectiveDueDate(job)),
+        "Recent Note": latestNote?.text.replace(/\s+/g, " ").trim() ?? "",
+      };
+    });
+    const headers = [
+      "Job#",
+      "KSID",
+      "PN Name",
+      "PN#",
+      "REV",
+      "Level/Type",
+      "Due Date",
+      "Recent Note",
+    ] as const;
+    const escapeCell = (value: string) =>
+      value.replace(
+        /[&<>]/g,
+        (character) =>
+          ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[character]!,
+      );
+    const html = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px"><thead><tr>${headers
+      .map(
+        (header) =>
+          `<th style="border:1px solid #aab4c4;padding:8px;text-align:left;background:#e9eef6">${header}</th>`,
+      )
+      .join("")}</tr></thead><tbody>${rows
+      .map(
+        (row) =>
+          `<tr>${headers
+            .map(
+              (header) =>
+                `<td style="border:1px solid #aab4c4;padding:8px;vertical-align:top">${escapeCell(String(row[header]))}</td>`,
+            )
+            .join("")}</tr>`,
+      )
+      .join("")}</tbody></table>`;
+    const plain = [
+      headers.join("\t"),
+      ...rows.map((row) => headers.map((header) => row[header]).join("\t")),
+    ].join("\n");
+    try {
+      if (typeof ClipboardItem !== "undefined" && navigator.clipboard.write) {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "text/html": new Blob([html], { type: "text/html" }),
+            "text/plain": new Blob([plain], { type: "text/plain" }),
+          }),
+        ]);
+      } else {
+        await navigator.clipboard.writeText(plain);
+      }
+      setShowJobExcelFormat(false);
+      notify(`${selectedJobs.length} ${customer} job${selectedJobs.length === 1 ? "" : "s"} copied in Job Excel Format.`);
+    } catch {
+      notify("Copy was blocked by the browser. Please try again.");
+    }
+  }
+
   async function copyProductionAgenda() {
     const rows = divisionJobs
       .filter((job) => productionAgendaStatuses.includes(job.status))
@@ -3206,6 +3402,9 @@ function DivisionView({
           <button className="button secondary" onClick={copyProductionAgenda}>
             <Copy size={17} /> Copy Production Agenda
           </button>
+          <button className="button secondary" onClick={openJobExcelFormat}>
+            <FileSpreadsheet size={17} /> Job Excel Format
+          </button>
           <button className="button primary" onClick={onNew}>
             <Plus size={17} /> Add {division} job
           </button>
@@ -3291,6 +3490,104 @@ function DivisionView({
             </div>
           </details>
         </section>
+      )}
+      {showJobExcelFormat && customer && (
+        <div
+          className="modal-layer"
+          onMouseDown={(event) =>
+            event.target === event.currentTarget && setShowJobExcelFormat(false)
+          }
+        >
+          <section
+            className="modal-card job-excel-format-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="job-excel-format-title"
+          >
+            <div className="modal-header">
+              <div>
+                <p className="section-kicker">{division} · {customer}</p>
+                <h2 id="job-excel-format-title">Job Excel Format</h2>
+                <p>Select the jobs to include in the copy-and-paste email table.</p>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="Close Job Excel Format"
+                onClick={() => setShowJobExcelFormat(false)}
+              >
+                <X />
+              </button>
+            </div>
+            <div className="job-excel-format-controls">
+              <button
+                type="button"
+                className="button small secondary"
+                onClick={() =>
+                  setSelectedJobExcelIds(customerJobs.map((job) => job.id))
+                }
+              >
+                Select all
+              </button>
+              <button
+                type="button"
+                className="button small secondary"
+                onClick={() => setSelectedJobExcelIds([])}
+              >
+                Clear all
+              </button>
+              <span>
+                {selectedJobExcelIds.length} of {customerJobs.length} selected
+              </span>
+            </div>
+            <div className="job-excel-format-list">
+              {[...customerJobs]
+                .sort((a, b) =>
+                  a.jobNumber.localeCompare(b.jobNumber, undefined, {
+                    numeric: true,
+                  }),
+                )
+                .map((job) => (
+                  <label key={job.id}>
+                    <input
+                      type="checkbox"
+                      checked={selectedJobExcelIds.includes(job.id)}
+                      onChange={(event) =>
+                        setSelectedJobExcelIds((current) =>
+                          event.target.checked
+                            ? [...current, job.id]
+                            : current.filter((id) => id !== job.id),
+                        )
+                      }
+                    />
+                    <span>
+                      <strong>Job #{job.jobNumber}</strong>
+                      <small>
+                        {job.ksid || "No KSID"} · {job.pnName || job.pn || "No PN details"} · {job.buildLevel || job.projectType}
+                      </small>
+                    </span>
+                  </label>
+                ))}
+            </div>
+            <div className="modal-actions job-excel-format-actions">
+              <button
+                type="button"
+                className="button secondary"
+                onClick={() => setShowJobExcelFormat(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="button primary"
+                onClick={copyJobExcelFormat}
+                disabled={!selectedJobExcelIds.length}
+              >
+                <Copy size={17} /> Copy selected jobs
+              </button>
+            </div>
+          </section>
+        </div>
       )}
     </section>
   );
@@ -5415,13 +5712,25 @@ function ShortageEditor({
 function WeeklyNotepad({
   state,
   onChange,
+  meetingNotes,
+  onMeetingNotesChange,
+  customers,
+  preferredCustomer,
 }: {
   state: WeeklyActionsState;
   onChange: (state: WeeklyActionsState) => void;
+  meetingNotes: MeetingNote[];
+  onMeetingNotesChange: (notes: MeetingNote[]) => void;
+  customers: MeetingCustomerOption[];
+  preferredCustomer: string | null;
 }) {
   const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<"weekly" | "meetings">("weekly");
   const [draft, setDraft] = useState("");
+  const [meetingDraft, setMeetingDraft] = useState("");
   const today = chicagoDateKey();
+  const [meetingDate, setMeetingDate] = useState(today);
+  const [meetingCustomerKey, setMeetingCustomerKey] = useState("");
   const [selectedWeekStart, setSelectedWeekStart] = useState(
     state.current.weekStart,
   );
@@ -5444,6 +5753,25 @@ function WeeklyNotepad({
       total + day.tasks.filter((task) => !task.complete).length,
     0,
   );
+  const todayMeetingCount = meetingNotes.filter((note) => note.date === today).length;
+  const meetingNotesForDate = meetingNotes
+    .filter((note) => note.date === meetingDate)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+  useEffect(() => {
+    const preferred = customers.find(
+      (option) => option.customer === preferredCustomer,
+    );
+    const currentStillExists = customers.some(
+      (option) => `${option.division}|${option.customer}` === meetingCustomerKey,
+    );
+    if (preferred) {
+      setMeetingCustomerKey(`${preferred.division}|${preferred.customer}`);
+    } else if (!currentStillExists) {
+      const first = customers[0];
+      setMeetingCustomerKey(first ? `${first.division}|${first.customer}` : "");
+    }
+  }, [customers, preferredCustomer, meetingCustomerKey]);
 
   function moveWeek(direction: number) {
     const nextStart = shiftWorkWeek(selectedWeek.weekStart, direction);
@@ -5494,54 +5822,126 @@ function WeeklyNotepad({
     setDraft("");
   }
 
+  function openMeetingNotes() {
+    const preferred = customers.find(
+      (option) => option.customer === preferredCustomer,
+    );
+    if (preferred) {
+      setMeetingCustomerKey(`${preferred.division}|${preferred.customer}`);
+    }
+    setMeetingDate(today);
+    setMode("meetings");
+    setOpen(true);
+  }
+
+  function addMeetingNote(event: FormEvent) {
+    event.preventDefault();
+    const text = meetingDraft.trim();
+    const option = customers.find(
+      (candidate) =>
+        `${candidate.division}|${candidate.customer}` === meetingCustomerKey,
+    );
+    if (!text || !option) return;
+    onMeetingNotesChange([
+      ...meetingNotes,
+      {
+        id: makeId("meeting-note"),
+        date: meetingDate,
+        division: option.division,
+        customer: option.customer,
+        text,
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+    setMeetingDraft("");
+  }
+
   if (!open) {
     return (
-      <button className="weekly-notepad-launcher" onClick={() => setOpen(true)}>
-        <StickyNote size={19} />
-        <span>Weekly Actions</span>
-        {openTaskCount > 0 && <b>{openTaskCount}</b>}
-      </button>
+      <div className="notepad-launchers" aria-label="Quick notes">
+        <button
+          className="weekly-notepad-launcher"
+          onClick={() => {
+            setMode("weekly");
+            setOpen(true);
+          }}
+        >
+          <StickyNote size={19} />
+          <span>Weekly Actions</span>
+          {openTaskCount > 0 && <b>{openTaskCount}</b>}
+        </button>
+        <button className="meeting-notes-launcher" onClick={openMeetingNotes}>
+          <UserRound size={19} />
+          <span>Meeting Notes</span>
+          {todayMeetingCount > 0 && <b>{todayMeetingCount}</b>}
+        </button>
+      </div>
     );
   }
 
   return (
-    <aside className="weekly-notepad" aria-label="Weekly Actions">
+    <aside
+      className={`weekly-notepad ${mode === "meetings" ? "meeting-mode" : ""}`}
+      aria-label={mode === "weekly" ? "Weekly Actions" : "Meeting Notes"}
+    >
       <header>
         <div>
-          <span className="notepad-title">
-            <StickyNote size={17} /> Weekly Actions
-          </span>
+          <div className="notepad-mode-tabs" role="tablist" aria-label="Quick notes view">
+            <button
+              className={mode === "weekly" ? "active" : ""}
+              onClick={() => setMode("weekly")}
+              role="tab"
+              aria-selected={mode === "weekly"}
+            >
+              <StickyNote size={15} /> Weekly Actions
+            </button>
+            <button
+              className={mode === "meetings" ? "active" : ""}
+              onClick={() => setMode("meetings")}
+              role="tab"
+              aria-selected={mode === "meetings"}
+            >
+              <UserRound size={15} /> Meeting Notes
+            </button>
+          </div>
           <small>
-            {dateLabel(selectedWeek.weekStart)} – {dateLabel(selectedWeek.weekEnd)}
+            {mode === "weekly"
+              ? `${dateLabel(selectedWeek.weekStart)} – ${dateLabel(selectedWeek.weekEnd)}`
+              : "Daily notes organized by customer"}
           </small>
         </div>
         <div className="weekly-window-actions">
-          <button
-            aria-label="Previous week"
-            onClick={() => moveWeek(-1)}
-            title="Previous week"
-          >
-            <ChevronLeft size={18} />
-          </button>
-          <button
-            className="weekly-current-button"
-            onClick={returnToCurrentWeek}
-            disabled={selectedWeek.weekStart === state.current.weekStart}
-          >
-            Today
-          </button>
-          <button
-            aria-label="Next week"
-            onClick={() => moveWeek(1)}
-            title="Next week"
-          >
-            <ChevronRight size={18} />
-          </button>
+          {mode === "weekly" && (
+            <>
+              <button
+                aria-label="Previous week"
+                onClick={() => moveWeek(-1)}
+                title="Previous week"
+              >
+                <ChevronLeft size={18} />
+              </button>
+              <button
+                className="weekly-current-button"
+                onClick={returnToCurrentWeek}
+                disabled={selectedWeek.weekStart === state.current.weekStart}
+              >
+                Today
+              </button>
+              <button
+                aria-label="Next week"
+                onClick={() => moveWeek(1)}
+                title="Next week"
+              >
+                <ChevronRight size={18} />
+              </button>
+            </>
+          )}
           <button aria-label="Minimize weekly actions" onClick={() => setOpen(false)}>
             <ChevronDown size={18} />
           </button>
         </div>
       </header>
+      {mode === "weekly" ? (
       <div className="weekly-notepad-body">
         <div className="notepad-days" role="tablist" aria-label="Work week">
           {selectedWeek.days.map((day) => {
@@ -5630,8 +6030,101 @@ function WeeklyNotepad({
           </form>
         </div>
       </div>
+      ) : (
+        <div className="meeting-notes-body">
+          <div className="meeting-notes-toolbar">
+            <label>
+              <span>Meeting date</span>
+              <input
+                type="date"
+                value={meetingDate}
+                onChange={(event) => setMeetingDate(event.target.value)}
+              />
+            </label>
+            <button
+              className="meeting-today-button"
+              onClick={() => setMeetingDate(today)}
+              disabled={meetingDate === today}
+            >
+              Today
+            </button>
+            <label className="meeting-customer-select">
+              <span>Apply notes to customer</span>
+              <select
+                value={meetingCustomerKey}
+                onChange={(event) => setMeetingCustomerKey(event.target.value)}
+              >
+                {!customers.length && <option value="">No customers available</option>}
+                {(["Commercial", "Aerospace"] as Division[]).map((division) => {
+                  const divisionCustomers = customers.filter(
+                    (option) => option.division === division,
+                  );
+                  return divisionCustomers.length ? (
+                    <optgroup label={division} key={division}>
+                      {divisionCustomers.map((option) => (
+                        <option
+                          key={`${option.division}|${option.customer}`}
+                          value={`${option.division}|${option.customer}`}
+                        >
+                          {option.customer}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ) : null;
+                })}
+              </select>
+            </label>
+          </div>
+          <form className="meeting-note-add" onSubmit={addMeetingNote}>
+            <textarea
+              aria-label="New meeting note"
+              value={meetingDraft}
+              onChange={(event) => setMeetingDraft(event.target.value)}
+              placeholder="Jot down decisions, requests, commitments, or next steps…"
+              rows={3}
+            />
+            <button disabled={!meetingDraft.trim() || !meetingCustomerKey}>
+              <Plus size={16} /> Add Meeting Note
+            </button>
+          </form>
+          <div className="meeting-note-heading">
+            <strong>{meetingDate === today ? "Today’s notes" : dateLabel(meetingDate)}</strong>
+            <small>{meetingNotesForDate.length} notes</small>
+          </div>
+          <div className="meeting-note-list">
+            {meetingNotesForDate.length ? (
+              meetingNotesForDate.map((note) => (
+                <article className="meeting-note-card" key={note.id}>
+                  <div>
+                    <strong>{note.customer}</strong>
+                    <small>{note.division}</small>
+                  </div>
+                  <p>{note.text}</p>
+                  <button
+                    aria-label={`Delete meeting note for ${note.customer}`}
+                    onClick={() =>
+                      onMeetingNotesChange(
+                        meetingNotes.filter((item) => item.id !== note.id),
+                      )
+                    }
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </article>
+              ))
+            ) : (
+              <div className="notepad-empty meeting-note-empty">
+                <UserRound size={23} />
+                <span>No meeting notes for this date.</span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       <footer>
-        Use the arrows to add or review action notes in past and future weeks.
+        {mode === "weekly"
+          ? "Use the arrows to add or review action notes in past and future weeks."
+          : "Meeting notes are saved by date and customer on this computer."}
       </footer>
     </aside>
   );
