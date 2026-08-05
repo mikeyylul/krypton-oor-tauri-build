@@ -56,6 +56,9 @@ if (!String(config.app?.security?.csp).includes("connect-src 'self'")) {
 if (!rustSource.includes("on_navigation") || !rustSource.includes("NewWindowResponse::Deny")) {
   throw new Error("The Tauri application is missing external navigation blocking.");
 }
+if (!rustSource.includes("disable_drag_drop_handler")) {
+  throw new Error("The Windows WebView must pass HTML5 drag-and-drop events to the interface.");
+}
 for (const fragment of [
   "Shell.Application",
   "BrowseForFolder",
@@ -94,12 +97,34 @@ for (const fragment of [
   "meetingNotesStorageKey",
   "Meeting Notes",
   "meetingNotesHydrated",
+  "reconcileObsoleteComment",
+  "shortagePastProjectDueDate",
+  "Paste Excel table for New Project",
+  "Paste Excel table for OLD DATA Production Booking",
+  "Paste Excel shortage table",
+  "excel-paste-disclosure",
+  "oldBookingPriority",
+  "blockedByPendingPcba",
+  "excludeFromFollowUps",
+  "No Follow Ups",
+  "initialKryptonDockDate",
+  "activePartialDockDate",
+  "materialsReadyDate",
+  "customerFromDrop",
+  'event.dataTransfer.setData("text/plain", payload)',
 ]) {
   if (!desktopSource.includes(fragment)) {
-    throw new Error(`Missing Version 63 workflow behavior: ${fragment}`);
+    throw new Error(`Missing Version 65 workflow behavior: ${fragment}`);
   }
 }
 
+if (desktopSource.includes("shortageExceedsFifteenBusinessDays")) {
+  throw new Error("The removed 15-business-day shortage rule returned.");
+}
+if ((desktopSource.match(/<details className="excel-paste-disclosure">/g) ?? []).length !== 3) {
+  throw new Error("All three Excel paste areas must remain collapsible.");
+}
+
 console.log(
-  "Validated Website Version 63 parity, native RFQ folder creation, local autosave identity, packaged photo OCR, and Tauri offline restrictions.",
+  "Validated Website Version 65 parity, Windows organization-folder drag-and-drop, native RFQ folder creation, local autosave identity, packaged photo OCR, and Tauri offline restrictions.",
 );

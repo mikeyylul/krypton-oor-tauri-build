@@ -6762,6 +6762,245 @@ button:disabled {
   .rfq-photo-scan .button { grid-column: 1 / -1; }
   .krypton-dock-controls { grid-column: 1 / -1; grid-template-columns: 1fr; }
 }
+
+/* Website v64: clipboard imports, shortage overrides, and customer follow-up controls */
+.excel-paste-disclosure {
+  background: #f7f9fc;
+  border: 1px dashed #b7c4d6;
+  border-radius: 10px;
+  margin: 12px 0;
+  overflow: hidden;
+}
+
+.excel-paste-disclosure > summary {
+  align-items: center;
+  cursor: pointer;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(210px, 1fr) auto auto;
+  list-style: none;
+  padding: 12px;
+  user-select: none;
+}
+
+.excel-paste-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.excel-paste-disclosure > summary:hover {
+  background: #eef4fb;
+}
+
+.excel-paste-disclosure > summary > span {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.excel-paste-disclosure > summary small {
+  color: var(--muted);
+}
+
+.excel-paste-disclosure > summary > svg {
+  color: #315c89;
+  transition: transform 160ms ease;
+}
+
+.excel-paste-disclosure[open] > summary > svg {
+  transform: rotate(180deg);
+}
+
+.excel-paste-disclosure[open] > summary {
+  border-bottom: 1px solid #d8e1ec;
+}
+
+.excel-paste-import {
+  align-items: end;
+  background: #fff;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(210px, 0.8fr) minmax(320px, 1.5fr) auto;
+  margin: 0;
+  padding: 12px;
+}
+
+.excel-paste-import > div {
+  align-self: center;
+}
+
+.excel-paste-import strong,
+.excel-paste-import small,
+.excel-paste-import em {
+  display: block;
+}
+
+.excel-paste-import small {
+  color: var(--muted);
+  line-height: 1.45;
+  margin-top: 3px;
+}
+
+.excel-paste-import em {
+  color: #315c89;
+  font-size: 11px;
+  font-style: normal;
+  margin-top: 5px;
+}
+
+.excel-paste-import textarea {
+  background: #fff;
+  border: 1px solid #cfd8e5;
+  border-radius: 8px;
+  font: 11px/1.4 Consolas, "Courier New", monospace;
+  min-height: 68px;
+  padding: 9px;
+  resize: vertical;
+  width: 100%;
+}
+
+.shortage-row.obsolete-row {
+  background: #fee2e2 !important;
+  border-color: #ef4444 !important;
+  box-shadow: inset 4px 0 0 #dc2626;
+}
+
+.shortage-row.obsolete-row input {
+  background: #fff7f7;
+  border-color: #f3a5a5;
+}
+
+.button-count {
+  align-items: center;
+  background: #b4232c;
+  border-radius: 999px;
+  color: #fff;
+  display: inline-flex;
+  font-size: 9px;
+  font-weight: 800;
+  height: 18px;
+  justify-content: center;
+  min-width: 18px;
+  padding: 0 5px;
+}
+
+.no-follow-ups-modal {
+  max-width: 680px;
+}
+
+.no-follow-ups-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.no-follow-ups-controls label {
+  align-items: center;
+  border: 1px solid #cfd8e5;
+  border-radius: 8px;
+  display: flex;
+  flex: 1 1 190px;
+  gap: 7px;
+  padding: 0 9px;
+}
+
+.no-follow-ups-controls input {
+  border: 0;
+  min-width: 0;
+  outline: 0;
+  padding: 9px 0;
+  width: 100%;
+}
+
+.no-follow-ups-list {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.no-follow-ups-list > label,
+.old-data-linked-jobs > div > label {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.no-follow-ups-list > label:last-child,
+.old-data-linked-jobs > div > label:last-child {
+  border-bottom: 0;
+}
+
+.no-follow-ups-list span,
+.no-follow-ups-list strong,
+.no-follow-ups-list small,
+.old-data-linked-jobs span,
+.old-data-linked-jobs strong,
+.old-data-linked-jobs small {
+  display: block;
+}
+
+.no-follow-ups-list small,
+.old-data-linked-jobs small,
+.old-data-linked-jobs em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  margin-top: 2px;
+}
+
+.old-data-linked-jobs {
+  background: #f7f9fc;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  margin-top: 12px;
+  padding: 12px;
+}
+
+.old-data-linked-jobs > div {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-top: 9px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.legacy-booking-order-warning {
+  background: #fff3cd;
+  border: 1px solid #f1d28a;
+  border-radius: 8px;
+  color: #78570b;
+  flex: 1 1 100%;
+  font-size: 11px;
+  font-weight: 700;
+  margin: 0;
+  padding: 9px 11px;
+}
+
+@media (max-width: 880px) {
+  .excel-paste-disclosure > summary {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .excel-paste-disclosure > summary small {
+    display: none;
+  }
+
+  .excel-paste-import {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .excel-paste-import .button {
+    justify-content: center;
+    width: 100%;
+  }
+}
 .rfq-division-picker {
   margin-bottom: 17px;
 }

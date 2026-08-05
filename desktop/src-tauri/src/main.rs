@@ -182,6 +182,7 @@ fn main() {
                 .inner_size(1440.0, 900.0)
                 .min_inner_size(1100.0, 700.0)
                 .resizable(true)
+                .disable_drag_drop_handler()
                 .on_navigation(|url| {
                     let packaged_app = url.scheme() == "tauri"
                         || matches!(url.host_str(), Some("tauri.localhost"));

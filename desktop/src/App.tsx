@@ -34,6 +34,7 @@ import {
 import * as XLSX from "xlsx";
 import {
   ChangeEvent,
+  DragEvent,
   FormEvent,
   useEffect,
   useMemo,
@@ -188,6 +189,7 @@ type ShortageItem = {
 };
 type Job = {
   id: string;
+  entryMethod?: "new-project" | "old-data";
   division: Division;
   customer: string;
   jobNumber: string;
@@ -237,6 +239,7 @@ type Job = {
   followUpCadence?: FollowUpCadence | "";
   actionDeferralMode?: FollowUpCadence | "";
   actionDeferredUntil?: string;
+  excludeFromFollowUps?: boolean;
 };
 type ActionItem = {
   id: string;
@@ -573,6 +576,9 @@ const CUSTOMER_SUPPLIED_NOTE =
   "CUSTOMER to provide Tracking information or ETA";
 const LEAD_TIME_NOTE =
   "CUSTOMER to Accept Lead Time, CFM, or Provide Alternative PN";
+const OBSOLETE_ACTION_NOTE =
+  "Customer needs to CFM , Provide ALT PN, or DNI";
+const OBSOLETE_COMMENT = `OBSOLETE - ${OBSOLETE_ACTION_NOTE}`;
 
 function removeAutomaticShortageNote(comments: string, note: string) {
   return comments
@@ -588,66 +594,69 @@ function addAutomaticShortageNote(comments: string, note: string) {
   return clean ? `${clean} | ${note}` : note;
 }
 
-function longestOpenShortageDate(shortages: ShortageItem[]) {
-  return latestDate(
-    shortages
-      .filter(
-        (item) => !item.complete && !item.customerSupplied && item.dueDate,
-      )
-      .map((item) => item.dueDate),
-  );
+function hasObsoleteComment(comments: string) {
+  return /\bobsolete\b/i.test(comments);
 }
 
-function shortagePushesDockDate(
-  item: ShortageItem,
-  shortages: ShortageItem[],
-  pcbDockDate: string,
-) {
-  const longestDate = longestOpenShortageDate(shortages);
-  return (
-    !item.complete &&
-    !item.customerSupplied &&
-    Boolean(item.dueDate) &&
-    item.dueDate === longestDate &&
-    (!pcbDockDate || item.dueDate > pcbDockDate)
-  );
+function reconcileObsoleteComment(comments: string) {
+  const hasObsolete = hasObsoleteComment(comments);
+  const withoutAutomaticAction = comments
+    .replace(
+      /\s*(?:\||-)?\s*Customer needs to CFM\s*,\s*Provide ALT PN\s*,?\s*or DNI/gi,
+      "",
+    )
+    .replace(/\s*(?:\||-)\s*$/g, "")
+    .trim();
+  if (!hasObsolete) return withoutAutomaticAction;
+  return withoutAutomaticAction
+    ? `${withoutAutomaticAction} - ${OBSOLETE_ACTION_NOTE}`
+    : OBSOLETE_COMMENT;
 }
 
-function shortageExceedsFifteenBusinessDays(
+function shortagePastProjectDueDate(
   item: ShortageItem,
-  projectCreationDate: string,
+  customerDueDate: string,
+  calculatedDueDate: string,
 ) {
   if (
     item.complete ||
     item.customerSupplied ||
-    !item.dueDate ||
-    !projectCreationDate
+    !item.dueDate
   ) {
     return false;
   }
-  return item.dueDate > addBusinessDays(projectCreationDate, 15);
+  return [customerDueDate, calculatedDueDate]
+    .filter(Boolean)
+    .some((projectDueDate) => item.dueDate > projectDueDate);
 }
 
-function reconcileShortageComments(
-  shortages: ShortageItem[],
-  pcbDockDate: string,
-  projectCreationDate: string,
+function applyShortageAutomation(item: ShortageItem, job: Job) {
+  let comments = removeAutomaticShortageNote(
+    removeAutomaticShortageNote(item.comments, CUSTOMER_SUPPLIED_NOTE),
+    LEAD_TIME_NOTE,
+  );
+  comments = reconcileObsoleteComment(comments);
+  if (hasObsoleteComment(comments)) {
+    return { ...item, dueDate: item.dueDate || "", comments };
+  }
+  if (item.customerSupplied) {
+    comments = addAutomaticShortageNote(comments, CUSTOMER_SUPPLIED_NOTE);
+  } else if (
+    shortagePastProjectDueDate(item, job.customerDueDate, job.dueDate)
+  ) {
+    comments = addAutomaticShortageNote(comments, LEAD_TIME_NOTE);
+  }
+  return { ...item, comments };
+}
+
+function mergeImportedShortages(
+  job: Job,
+  importedItems: ShortageItem[],
 ) {
-  return shortages.map((item) => {
-    let comments = removeAutomaticShortageNote(
-      removeAutomaticShortageNote(item.comments, CUSTOMER_SUPPLIED_NOTE),
-      LEAD_TIME_NOTE,
-    );
-    if (item.customerSupplied) {
-      comments = addAutomaticShortageNote(comments, CUSTOMER_SUPPLIED_NOTE);
-    } else if (
-      shortagePushesDockDate(item, shortages, pcbDockDate) ||
-      shortageExceedsFifteenBusinessDays(item, projectCreationDate)
-    ) {
-      comments = addAutomaticShortageNote(comments, LEAD_TIME_NOTE);
-    }
-    return { ...item, comments };
-  });
+  const imported = importedItems.map((item) =>
+    applyShortageAutomation(item, job),
+  );
+  return [...job.shortages, ...imported];
 }
 
 function specialProcessTurnDays(job: Job) {
@@ -708,12 +717,17 @@ function activePartialDockDate(job: Job) {
   );
 }
 
+function initialKryptonDockDate(job: Job) {
+  if (job.entryMethod !== "old-data" && job.dueDate) return job.dueDate;
+  return job.customerDueDate || "";
+}
+
 function kryptonDockDate(job: Job) {
   const partialDockDate = activePartialDockDate(job);
   if (partialDockDate) return partialDockDate;
   if (job.kryptonDockDateOverride) return job.kryptonDockDateOverride;
   const readyDate = materialsReadyDate(job);
-  if (!readyDate) return "";
+  if (!readyDate) return initialKryptonDockDate(job);
   return addBusinessDays(
     readyDate,
     job.assemblyTurnDays + specialProcessTurnDays(job),
@@ -734,7 +748,13 @@ function kryptonDockDriver(job: Job) {
     .join(", ");
 
   if (!job.pcbDockDate && !longestShortageDate) {
-    return "Waiting for PCB Dock Date and shortage due dates";
+    if (job.entryMethod !== "old-data" && job.dueDate) {
+      return `Initial New Project Calculated Due Date: ${dateLabel(job.dueDate)}`;
+    }
+    if (job.customerDueDate) {
+      return `Initial Customer Due Date: ${dateLabel(job.customerDueDate)}`;
+    }
+    return "Not Set — add a PCB arrival date or shortage due date";
   }
   if (!longestShortageDate || job.pcbDockDate >= longestShortageDate) {
     return `Controlled by PCB Dock Date: ${dateLabel(job.pcbDockDate)}${
@@ -1136,6 +1156,7 @@ function followUpItemsForJobs(jobs: Job[]): FollowUpItem[] {
 function normalizeJob(job: Job): Job {
   return {
     ...job,
+    entryMethod: job.entryMethod === "old-data" ? "old-data" : "new-project",
     buildLevel: job.buildLevel ?? "PCBA",
     familyId: job.familyId ?? job.id,
     projectFamilyName: job.projectFamilyName ?? "",
@@ -1214,6 +1235,7 @@ function normalizeJob(job: Job): Job {
         ? job.actionDeferralMode
         : "",
     actionDeferredUntil: job.actionDeferredUntil ?? "",
+    excludeFromFollowUps: job.excludeFromFollowUps ?? false,
   };
 }
 
@@ -1708,6 +1730,10 @@ export default function Home() {
     useState<CustomerOrganizationFolder[]>([]);
   const [customerOrganizationHydrated, setCustomerOrganizationHydrated] =
     useState(false);
+  const [draggedCustomer, setDraggedCustomer] = useState<{
+    division: Division;
+    customer: string;
+  } | null>(null);
 
   useEffect(() => {
     const saved = window.localStorage.getItem(storageKey);
@@ -2017,7 +2043,14 @@ export default function Home() {
     () => buildKsidProfiles(jobs, quotes),
     [jobs, quotes],
   );
-  const allActionItems = useMemo(() => actionItemsForJobs(jobs), [jobs]);
+  const followUpEligibleJobs = useMemo(
+    () => jobs.filter((job) => !job.excludeFromFollowUps),
+    [jobs],
+  );
+  const allActionItems = useMemo(
+    () => actionItemsForJobs(followUpEligibleJobs),
+    [followUpEligibleJobs],
+  );
   const actionItems = useMemo(
     () =>
       allActionItems.filter((item) => {
@@ -2036,7 +2069,10 @@ export default function Home() {
       }),
     [allActionItems, jobs],
   );
-  const followUpItems = useMemo(() => followUpItemsForJobs(jobs), [jobs]);
+  const followUpItems = useMemo(
+    () => followUpItemsForJobs(followUpEligibleJobs),
+    [followUpEligibleJobs],
+  );
 
   const metrics = useMemo(
     () => ({
@@ -2055,6 +2091,28 @@ export default function Home() {
 
   function notify(message: string) {
     setToast(message);
+  }
+  function customerFromDrop(event: DragEvent<HTMLElement>) {
+    const raw =
+      event.dataTransfer.getData("application/x-krypton-customer") ||
+      event.dataTransfer.getData("text/plain");
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as {
+          division?: Division;
+          customer?: string;
+        };
+        if (parsed.division && parsed.customer) {
+          return {
+            division: parsed.division,
+            customer: parsed.customer,
+          };
+        }
+      } catch {
+        // Fall back to the in-app drag state below.
+      }
+    }
+    return draggedCustomer;
   }
   function openDivision(division: Division) {
     setActiveView(division === "Commercial" ? "commercial" : "aerospace");
@@ -2267,30 +2325,14 @@ export default function Home() {
       notify("RFQ folders can only be created from the installed Windows app.");
       return;
     }
-    const selectionRequest = desktopInvoke<string | null>(
-      "select_rfq_customer_folder",
-      { division },
-    );
-    if (!selectionRequest) return;
-    let customerFolder: string | null;
-    try {
-      customerFolder = await selectionRequest;
-    } catch (error) {
-      notify(
-        typeof error === "string"
-          ? error
-          : `The ${division} customer folder could not be selected.`,
-      );
-      return;
-    }
-    if (!customerFolder) return;
+    const baseFolder =
+      division === "Commercial" ? "Q:\\Customer RFQs" : "P:\\RFQs";
     const folderName = window.prompt(
-      `Enter the new ${division} RFQ folder name.\n\nIt will be created inside:\n${customerFolder}`,
+      `Enter the new ${division} RFQ folder name.\n\nIt will be created under:\n${baseFolder}`,
     )?.trim();
     if (!folderName) return;
     const request = desktopInvoke<string>("create_rfq_folder", {
       division,
-      customerFolder,
       folderName,
     });
     if (!request) return;
@@ -2308,9 +2350,12 @@ export default function Home() {
 
   function bookOldJob(job: Job) {
     setJobs((current) => {
-      const familyJobs = job.familyId
-        ? current.filter((candidate) => candidate.familyId === job.familyId)
-        : [];
+      const explicitLinkedIds = new Set(job.linkedJobIds ?? []);
+      const familyJobs = current.filter(
+        (candidate) =>
+          explicitLinkedIds.has(candidate.id) ||
+          Boolean(job.familyId && candidate.familyId === job.familyId),
+      );
       const familyIds = familyJobs.map((candidate) => candidate.id);
       const normalized = normalizeJob({
         ...job,
@@ -2628,12 +2673,20 @@ export default function Home() {
                   draggable
                   key={customer}
                   onDragStart={(event) => {
-                    event.dataTransfer.setData(
-                      "application/x-krypton-customer",
-                      JSON.stringify({ division, customer }),
-                    );
+                    const payload = JSON.stringify({ division, customer });
+                    setDraggedCustomer({ division, customer });
+                    event.dataTransfer.setData("text/plain", payload);
+                    try {
+                      event.dataTransfer.setData(
+                        "application/x-krypton-customer",
+                        payload,
+                      );
+                    } catch {
+                      // WebView2 always keeps the text/plain and state fallbacks.
+                    }
                     event.dataTransfer.effectAllowed = "move";
                   }}
+                  onDragEnd={() => setDraggedCustomer(null)}
                   onClick={() => openCustomer(division, customer)}
                 >
                   <span className="subnav-branch" />
@@ -2697,25 +2750,18 @@ export default function Home() {
                             }}
                             onDrop={(event) => {
                               event.preventDefault();
-                              try {
-                                const dragged = JSON.parse(
-                                  event.dataTransfer.getData(
-                                    "application/x-krypton-customer",
-                                  ),
-                                ) as {
-                                  division: Division;
-                                  customer: string;
-                                };
-                                if (dragged.division === division) {
-                                  moveCustomerToOrganizationFolder(
-                                    division,
-                                    dragged.customer,
-                                    folder.id,
-                                  );
-                                }
-                              } catch {
-                                // Ignore unrelated drag data.
+                              const dragged = customerFromDrop(event);
+                              if (dragged?.division === division) {
+                                moveCustomerToOrganizationFolder(
+                                  division,
+                                  dragged.customer,
+                                  folder.id,
+                                );
+                                notify(
+                                  `${dragged.customer} moved into ${folder.name}.`,
+                                );
                               }
+                              setDraggedCustomer(null);
                             }}
                           >
                             <div className="organization-folder-heading">
@@ -2766,25 +2812,15 @@ export default function Home() {
                           onDragOver={(event) => event.preventDefault()}
                           onDrop={(event) => {
                             event.preventDefault();
-                            try {
-                              const dragged = JSON.parse(
-                                event.dataTransfer.getData(
-                                  "application/x-krypton-customer",
-                                ),
-                              ) as {
-                                division: Division;
-                                customer: string;
-                              };
-                              if (dragged.division === division) {
-                                moveCustomerToOrganizationFolder(
-                                  division,
-                                  dragged.customer,
-                                  null,
-                                );
-                              }
-                            } catch {
-                              // Ignore unrelated drag data.
+                            const dragged = customerFromDrop(event);
+                            if (dragged?.division === division) {
+                              moveCustomerToOrganizationFolder(
+                                division,
+                                dragged.customer,
+                                null,
+                              );
                             }
+                            setDraggedCustomer(null);
                           }}
                         >
                           {unfiledCustomers.map(customerButton)}
@@ -2898,6 +2934,7 @@ export default function Home() {
             onCustomerChange={setSelectedCustomer}
             onOpen={openJobTab}
             onNew={openNewProjectTab}
+            onUpdateJob={updateJob}
             notify={notify}
           />
         )}
@@ -3170,6 +3207,7 @@ function DivisionView({
   onCustomerChange,
   onOpen,
   onNew,
+  onUpdateJob,
   notify,
 }: {
   division: Division;
@@ -3179,12 +3217,16 @@ function DivisionView({
   onCustomerChange: (customer: string | null) => void;
   onOpen: (id: string) => void;
   onNew: () => void;
+  onUpdateJob: (id: string, change: Partial<Job>) => void;
   notify: (message: string) => void;
 }) {
   const [folderStatus, setFolderStatus] = useState<"All" | JobStatus>("All");
   const [jobSearch, setJobSearch] = useState("");
   const [showJobExcelFormat, setShowJobExcelFormat] = useState(false);
   const [selectedJobExcelIds, setSelectedJobExcelIds] = useState<string[]>([]);
+  const [showNoFollowUps, setShowNoFollowUps] = useState(false);
+  const [noFollowUpIds, setNoFollowUpIds] = useState<string[]>([]);
+  const [noFollowUpSearch, setNoFollowUpSearch] = useState("");
   const divisionJobs = folders.flatMap(([, items]) => items);
   const customerJobs = customer
     ? jobs.filter((job) => job.customer === customer)
@@ -3201,6 +3243,33 @@ function DivisionView({
     }
     setSelectedJobExcelIds(customerJobs.map((job) => job.id));
     setShowJobExcelFormat(true);
+  }
+
+  function openNoFollowUps() {
+    if (!customer) return;
+    setNoFollowUpIds(
+      customerJobs
+        .filter((job) => job.excludeFromFollowUps)
+        .map((job) => job.id),
+    );
+    setNoFollowUpSearch("");
+    setShowNoFollowUps(true);
+  }
+
+  function saveNoFollowUps() {
+    customerJobs.forEach((job) =>
+      onUpdateJob(job.id, {
+        excludeFromFollowUps: noFollowUpIds.includes(job.id),
+      }),
+    );
+    setShowNoFollowUps(false);
+    notify(
+      noFollowUpIds.length
+        ? `${noFollowUpIds.length} ${customer} job${
+            noFollowUpIds.length === 1 ? " is" : "s are"
+          } hidden from Action Items and Follow Up List.`
+        : `All ${customer} jobs can appear in Action Items and Follow Up List.`,
+    );
   }
 
   async function copyJobExcelFormat() {
@@ -3405,6 +3474,16 @@ function DivisionView({
           <button className="button secondary" onClick={openJobExcelFormat}>
             <FileSpreadsheet size={17} /> Job Excel Format
           </button>
+          {customer && (
+            <button className="button secondary" onClick={openNoFollowUps}>
+              <Bell size={17} /> No Follow Ups
+              {customerJobs.some((job) => job.excludeFromFollowUps) && (
+                <span className="button-count">
+                  {customerJobs.filter((job) => job.excludeFromFollowUps).length}
+                </span>
+              )}
+            </button>
+          )}
           <button className="button primary" onClick={onNew}>
             <Plus size={17} /> Add {division} job
           </button>
@@ -3584,6 +3663,114 @@ function DivisionView({
                 disabled={!selectedJobExcelIds.length}
               >
                 <Copy size={17} /> Copy selected jobs
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {showNoFollowUps && customer && (
+        <div
+          className="modal-layer"
+          onMouseDown={(event) =>
+            event.target === event.currentTarget && setShowNoFollowUps(false)
+          }
+        >
+          <section
+            className="modal-card no-follow-ups-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="no-follow-ups-title"
+          >
+            <div className="modal-header">
+              <div>
+                <p className="section-kicker">{division} · {customer}</p>
+                <h2 id="no-follow-ups-title">No Follow Ups</h2>
+                <p>
+                  Selected jobs will not appear in List of Action Items or the
+                  Follow Up List.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="Close No Follow Ups"
+                onClick={() => setShowNoFollowUps(false)}
+              >
+                <X />
+              </button>
+            </div>
+            <div className="no-follow-ups-controls">
+              <button
+                type="button"
+                className="button small secondary"
+                onClick={() => setNoFollowUpIds(customerJobs.map((job) => job.id))}
+              >
+                SELECT ALL
+              </button>
+              <button
+                type="button"
+                className="button small secondary"
+                onClick={() => setNoFollowUpIds([])}
+              >
+                DESELECT ALL
+              </button>
+              <label>
+                <Search size={15} />
+                <input
+                  value={noFollowUpSearch}
+                  onChange={(event) => setNoFollowUpSearch(event.target.value)}
+                  placeholder="Search Job#"
+                />
+              </label>
+            </div>
+            <div className="no-follow-ups-list">
+              {customerJobs
+                .filter((job) =>
+                  job.jobNumber
+                    .toLowerCase()
+                    .includes(noFollowUpSearch.trim().toLowerCase()),
+                )
+                .sort((a, b) =>
+                  a.jobNumber.localeCompare(b.jobNumber, undefined, {
+                    numeric: true,
+                  }),
+                )
+                .map((job) => (
+                  <label key={job.id}>
+                    <input
+                      type="checkbox"
+                      checked={noFollowUpIds.includes(job.id)}
+                      onChange={(event) =>
+                        setNoFollowUpIds((current) =>
+                          event.target.checked
+                            ? Array.from(new Set([...current, job.id]))
+                            : current.filter((id) => id !== job.id),
+                        )
+                      }
+                    />
+                    <span>
+                      <strong>Job #{job.jobNumber}</strong>
+                      <small>
+                        {job.ksid || "No KSID"} · {job.pnName || job.pn || "No PN details"}
+                      </small>
+                    </span>
+                  </label>
+                ))}
+            </div>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="button secondary"
+                onClick={() => setShowNoFollowUps(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="button primary"
+                onClick={saveNoFollowUps}
+              >
+                Save No Follow Ups
               </button>
             </div>
           </section>
@@ -5216,11 +5403,7 @@ function ShortagesView({
     try {
       const items = await parseShortageFile(file);
       updateJob(job.id, {
-        shortages: reconcileShortageComments(
-          [...job.shortages, ...items],
-          job.pcbDockDate,
-          job.createdDate,
-        ),
+        shortages: mergeImportedShortages(job, items),
         noShortageList: false,
         allPartsReceivedDate: "",
         status: job.status === "Kitting" ? "Waiting on Parts" : job.status,
@@ -5321,19 +5504,17 @@ function ShortageEditor({
   const [quantity, setQuantity] = useState("");
   const [due, setDue] = useState("");
   const [comments, setComments] = useState("");
+  const [shortagePaste, setShortagePaste] = useState("");
+  const [pasteMessage, setPasteMessage] = useState("");
   const allComplete =
     job.noShortageList ||
     (job.shortages.length > 0 && job.shortages.every((item) => item.complete));
   function toggle(item: ShortageItem) {
     const isAssemblyJob = job.buildLevel === "CCA" || job.buildLevel === "LRU";
-    const updated = reconcileShortageComments(
-      job.shortages.map((current) =>
-        current.id === item.id
-          ? { ...current, complete: !current.complete }
-          : current,
-      ),
-      job.pcbDockDate,
-      job.createdDate,
+    const updated = job.shortages.map((current) =>
+      current.id === item.id
+        ? { ...current, complete: !current.complete }
+        : current,
     );
     const nowAllComplete =
       updated.length > 0 && updated.every((current) => current.complete);
@@ -5390,14 +5571,29 @@ function ShortageEditor({
     );
   }
   function updateItem(id: string, change: Partial<ShortageItem>) {
-    const shortages = reconcileShortageComments(
-      job.shortages.map((item) =>
-        item.id === id ? { ...item, ...change } : item,
-      ),
-      job.pcbDockDate,
-      job.createdDate,
-    );
+    const refreshAutomaticRules =
+      Object.prototype.hasOwnProperty.call(change, "dueDate") ||
+      Object.prototype.hasOwnProperty.call(change, "customerSupplied");
+    const shortages = job.shortages.map((item) => {
+      if (item.id !== id) return item;
+      const updated = {
+        ...item,
+        ...change,
+        ...(change.customerSupplied === true ? { dueDate: "" } : {}),
+      };
+      return refreshAutomaticRules
+        ? applyShortageAutomation(updated, job)
+        : updated;
+    });
     onUpdate({ shortages });
+  }
+  function finishCommentEdit(id: string, value: string) {
+    const comments = reconcileObsoleteComment(value);
+    onUpdate({
+      shortages: job.shortages.map((item) =>
+        item.id === id ? { ...item, comments } : item,
+      ),
+    });
   }
   function add(event: FormEvent) {
     event.preventDefault();
@@ -5419,11 +5615,7 @@ function ShortageEditor({
       workflowCompleted: job.workflowCompleted.filter(
         (item) => item !== "shortage-list",
       ),
-      shortages: reconcileShortageComments(
-        [...job.shortages, newItem],
-        job.pcbDockDate,
-        job.createdDate,
-      ),
+      shortages: mergeImportedShortages(job, [newItem]),
     });
     setKsp("");
     setPn("");
@@ -5441,24 +5633,23 @@ function ShortageEditor({
   const longestLeadItems = datedOpenItems.filter(
     (item) => item.dueDate === longestShortageDate,
   );
-  const pushesDockDate = (item: ShortageItem) =>
-    shortagePushesDockDate(item, job.shortages, job.pcbDockDate);
   const requiresCustomerAction = (item: ShortageItem) =>
-    pushesDockDate(item) ||
-    shortageExceedsFifteenBusinessDays(item, job.createdDate);
+    shortagePastProjectDueDate(item, job.customerDueDate, job.dueDate);
   async function copyCustomerTable() {
     const rows = job.shortages.map((item) => ({
       pn: item.pnNumber,
       qty: item.quantity,
       due: item.customerSupplied ? "CUSTOMER SUPPLIED" : dateLabel(item.dueDate),
-      comments: item.customerSupplied
-        ? item.comments || CUSTOMER_SUPPLIED_NOTE
-        : requiresCustomerAction(item)
-          ? item.comments || LEAD_TIME_NOTE
-          : item.comments,
-      className: item.customerSupplied ? "customer-supplied" : requiresCustomerAction(item) ? "dock-impact" : "",
+      comments: item.comments,
+      className: hasObsoleteComment(item.comments)
+        ? "obsolete"
+        : item.customerSupplied
+          ? "customer-supplied"
+          : requiresCustomerAction(item)
+            ? "dock-impact"
+            : "",
     }));
-    const html = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px"><thead><tr>${["PN#", "QTY", "DUE DATE", "Additional Comments"].map((value) => `<th style="border:1px solid #aab4c4;padding:8px;text-align:left;background:#e9eef6">${value}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr style="background:${row.className === "customer-supplied" ? "#dbeafe" : row.className === "dock-impact" ? "#fee2e2" : "#ffffff"}">${[row.pn, row.qty, row.due, row.comments].map((value) => `<td style="border:1px solid #aab4c4;padding:8px">${String(value).replace(/[&<>]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[char]!)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+    const html = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px"><thead><tr>${["PN#", "QTY", "DUE DATE", "Additional Comments"].map((value) => `<th style="border:1px solid #aab4c4;padding:8px;text-align:left;background:#e9eef6">${value}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr style="background:${row.className === "customer-supplied" ? "#dbeafe" : row.className === "dock-impact" || row.className === "obsolete" ? "#fee2e2" : "#ffffff"}">${[row.pn, row.qty, row.due, row.comments].map((value) => `<td style="border:1px solid #aab4c4;padding:8px">${String(value).replace(/[&<>]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[char]!)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
     const plain = ["PN#\tQTY\tDUE DATE\tAdditional Comments", ...rows.map((row) => [row.pn, row.qty, row.due, row.comments].join("\t"))].join("\n");
     try {
       if (typeof ClipboardItem !== "undefined" && navigator.clipboard.write) {
@@ -5471,12 +5662,39 @@ function ShortageEditor({
       notify("Copy was blocked by the browser. Select the table and copy it manually.");
     }
   }
+  function importPastedShortages(text = shortagePaste) {
+    try {
+      const items = shortageItemsFromClipboard(text);
+      if (!items.length) {
+        setPasteMessage(
+          "No shortage rows were detected. Include the Excel header row and try again.",
+        );
+        return;
+      }
+      onUpdate({
+        shortages: mergeImportedShortages(job, items),
+        noShortageList: false,
+        allPartsReceivedDate: "",
+        status: job.status === "Kitting" ? "Waiting on Parts" : job.status,
+        workflowCompleted: job.workflowCompleted.filter(
+          (item) => item !== "shortage-list",
+        ),
+      });
+      setShortagePaste(text);
+      setPasteMessage(
+        `${items.length} pasted shortage row${items.length === 1 ? "" : "s"} added.`,
+      );
+      notify(
+        `${items.length} shortage item${items.length === 1 ? "" : "s"} pasted from Excel.`,
+      );
+    } catch {
+      setPasteMessage(
+        "The pasted table could not be read. Include the Excel header row and try again.",
+      );
+    }
+  }
   function removeItem(id: string) {
-    const shortages = reconcileShortageComments(
-      job.shortages.filter((item) => item.id !== id),
-      job.pcbDockDate,
-      job.createdDate,
-    );
+    const shortages = job.shortages.filter((item) => item.id !== id);
     const nowAllComplete =
       shortages.length > 0 && shortages.every((item) => item.complete);
     onUpdate({
@@ -5593,6 +5811,47 @@ function ShortageEditor({
               <Plus size={16} /> Add
             </button>
           </form>
+          <details className="excel-paste-disclosure">
+            <summary>
+              <span>
+                <FileSpreadsheet size={16} />
+                <strong>Paste shortage table from Excel</strong>
+              </span>
+              <small>Click to expand or collapse</small>
+              <ChevronDown size={16} aria-hidden="true" />
+            </summary>
+            <div className="excel-paste-import shortage-paste-import">
+              <div>
+                <small>
+                  Copy the headers and rows in Excel, then press CTRL+V here.
+                  Recognized due-date words are ignored unless they say CUSTOMER
+                  SUPPLIED or OBSOLETE.
+                </small>
+                {pasteMessage && <em>{pasteMessage}</em>}
+              </div>
+              <textarea
+                aria-label="Paste Excel shortage table"
+                value={shortagePaste}
+                onChange={(event) => setShortagePaste(event.target.value)}
+                onPaste={(event) => {
+                  const text = event.clipboardData.getData("text/plain");
+                  if (!text) return;
+                  event.preventDefault();
+                  importPastedShortages(text);
+                }}
+                placeholder={'KS Part No.\tManufacturer Part No.\tShortage QTY\tDue Date'}
+                rows={3}
+              />
+              <button
+                type="button"
+                className="button secondary small"
+                onClick={() => importPastedShortages()}
+                disabled={!shortagePaste.trim()}
+              >
+                <FileSpreadsheet size={15} /> Import pasted shortages
+              </button>
+            </div>
+          </details>
           <div className="shortage-table">
             <div className="shortage-head">
               <span>Received</span>
@@ -5606,7 +5865,15 @@ function ShortageEditor({
             </div>
             {job.shortages.map((item) => (
               <div
-                className={`shortage-row ${item.complete ? "checked" : ""} ${item.customerSupplied ? "customer-supplied-row" : requiresCustomerAction(item) ? "dock-impact-row" : ""}`}
+                className={`shortage-row ${item.complete ? "checked" : ""} ${
+                  hasObsoleteComment(item.comments)
+                    ? "obsolete-row"
+                    : item.customerSupplied
+                      ? "customer-supplied-row"
+                      : requiresCustomerAction(item)
+                        ? "dock-impact-row"
+                        : ""
+                }`}
                 key={item.id}
               >
                 <button
@@ -5674,6 +5941,9 @@ function ShortageEditor({
                   value={item.comments}
                   onChange={(event) =>
                     updateItem(item.id, { comments: event.target.value })
+                  }
+                  onBlur={(event) =>
+                    finishCommentEdit(item.id, event.target.value)
                   }
                   placeholder="Additional comments (optional)"
                 />
@@ -5753,7 +6023,6 @@ function WeeklyNotepad({
       total + day.tasks.filter((task) => !task.complete).length,
     0,
   );
-  const todayMeetingCount = meetingNotes.filter((note) => note.date === today).length;
   const meetingNotesForDate = meetingNotes
     .filter((note) => note.date === meetingDate)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -5873,7 +6142,6 @@ function WeeklyNotepad({
         <button className="meeting-notes-launcher" onClick={openMeetingNotes}>
           <UserRound size={19} />
           <span>Meeting Notes</span>
-          {todayMeetingCount > 0 && <b>{todayMeetingCount}</b>}
         </button>
       </div>
     );
@@ -6089,7 +6357,6 @@ function WeeklyNotepad({
           </form>
           <div className="meeting-note-heading">
             <strong>{meetingDate === today ? "Today’s notes" : dateLabel(meetingDate)}</strong>
-            <small>{meetingNotesForDate.length} notes</small>
           </div>
           <div className="meeting-note-list">
             {meetingNotesForDate.length ? (
@@ -7101,6 +7368,7 @@ type LegacyImportRow = {
   division: "" | Division;
   buildLevel: BuildLevel;
   familyName: string;
+  linkedJobIds: string[];
   fields: JobDraft;
   booked: boolean;
 };
@@ -7299,11 +7567,31 @@ function legacyRowFromRecord(
       : /commercial/i.test(divisionValue)
         ? "Commercial"
         : "",
-    buildLevel: "PCBA",
+    buildLevel: fields.jobNumber.trim().startsWith("5") ? "CCA" : "PCBA",
     familyName: "",
+    linkedJobIds: [],
     fields,
     booked: false,
   };
+}
+
+function oldBookingPriority(jobNumber: string) {
+  const trimmed = jobNumber.trim();
+  if (trimmed.startsWith("1")) return 0;
+  if (trimmed.startsWith("5")) return 2;
+  return 1;
+}
+
+function sortLegacyBookingRows(rows: LegacyImportRow[]) {
+  return [...rows].sort(
+    (a, b) =>
+      oldBookingPriority(a.fields.jobNumber) -
+        oldBookingPriority(b.fields.jobNumber) ||
+      a.fields.jobNumber.localeCompare(b.fields.jobNumber, undefined, {
+        numeric: true,
+      }) ||
+      a.sourceRow - b.sourceRow,
+  );
 }
 
 function legacyMissingFields(row: LegacyImportRow) {
@@ -7548,6 +7836,96 @@ function normalizeUploadedDate(value: unknown) {
   if (!match) return "";
   const year = match[3].length === 2 ? `20${match[3]}` : match[3];
   return `${year}-${match[1].padStart(2, "0")}-${match[2].padStart(2, "0")}`;
+}
+
+function clipboardTableRecords(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed) return [] as Record<string, unknown>[];
+  const workbook = XLSX.read(trimmed, { type: "string", cellDates: false });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  if (!sheet) return [] as Record<string, unknown>[];
+  return XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
+    defval: "",
+    raw: false,
+    dateNF: "m/d/yyyy",
+  });
+}
+
+type ParsedProjectDraft = Partial<JobDraft> & {
+  division?: Division;
+  polymerics?: boolean;
+  externalTesting?: boolean;
+  faiReport?: boolean;
+  otherProcess?: boolean;
+};
+
+function projectDraftFromRecord(record: Record<string, unknown>): ParsedProjectDraft {
+  const row = Object.fromEntries(
+    Object.entries(record).map(([key, value]) => [normalizeHeading(key), value]),
+  );
+  const value = (...keys: string[]) =>
+    keys
+      .map((key) => row[normalizeHeading(key)])
+      .find((item) => item !== undefined && String(item).trim()) ?? "";
+  const divisionValue = String(value("Division", "Business Section"));
+  const typeValue = String(value("Project Type", "Type"));
+  const statusValue = String(value("Status"));
+  const special = String(value("Special Processes", "Special Process"));
+  return {
+    division: /aerospace/i.test(divisionValue)
+      ? "Aerospace"
+      : /commercial/i.test(divisionValue)
+        ? "Commercial"
+        : undefined,
+    customer: String(
+      value("Customer Sub-Category / Folder", "Customer Sub-Category", "Customer", "Customer Name"),
+    ),
+    jobNumber: String(value("Job #", "Job Number", "Job No")),
+    ksid: String(value("KSID")),
+    pnName: String(value("PN Name", "Part Name", "Job Name")),
+    pn: String(value("PN", "PN#", "Part Number", "Part #")),
+    rev: String(value("Rev", "Revision")),
+    quantity: String(value("QTY", "Quantity")),
+    projectType:
+      projectTypes.find(
+        (item) => item.toLowerCase() === typeValue.toLowerCase(),
+      ) ?? matchingProjectType(value("Job Type", "Job Types")),
+    contact: String(value("Contact", "POC", "Point of Contact")),
+    customerDueDate: normalizeUploadedDate(
+      value("Customer Due Date", "Due Date"),
+    ),
+    poNumber: String(value("PO#", "PO Number", "PO")),
+    quoteNumber: String(value("Quote#", "Quote Number", "Quote")),
+    status:
+      jobStatuses.find(
+        (item) => item.toLowerCase() === statusValue.toLowerCase(),
+      ) ?? "",
+    createdDate: normalizeUploadedDate(
+      value("Project Creation Date", "Creation Date"),
+    ),
+    fabricationTurnDays:
+      String(value("Fabrication Turn Time", "Fab Turn Time")).match(/\d+/)?.[0] ?? "",
+    assemblyTurnDays:
+      String(value("Assembly Turn Time")).match(/\d+/)?.[0] ?? "",
+    polymericsTurnDays:
+      String(value("Polymerics Turn Time")).match(/\d+/)?.[0] ?? "",
+    externalTestingTurnDays:
+      String(value("External Testing Turn Time")).match(/\d+/)?.[0] ?? "",
+    smtDays:
+      String(value("SMT Turn Time", "SMT Days")).match(/\d+/)?.[0] ?? "",
+    polymerics:
+      /polymerics/i.test(special) || Boolean(value("Polymerics Turn Time")),
+    externalTesting:
+      /external testing/i.test(special) ||
+      Boolean(value("External Testing Turn Time")),
+    faiReport: /\bfai\s*report\b/i.test(special),
+    otherProcess: /\bother(?:s)?\b/i.test(special),
+    otherSpecialProcess: String(
+      value("Other Special Process", "Others", "Other"),
+    ),
+    otherSpecialProcessTurnDays:
+      String(value("Other Turn Time", "Others Turn Time")).match(/\d+/)?.[0] ?? "",
+  };
 }
 
 function extractOcrValue(text: string, labels: string[]) {
@@ -7883,6 +8261,68 @@ type ShortageOcrField =
   | "pnNumber"
   | "dueDate";
 
+function shortageDueMetadata(value: unknown) {
+  const text = String(value ?? "").trim();
+  const customerSupplied = /customer\s*supplied/i.test(text);
+  const obsolete = /\bobsolete\b/i.test(text);
+  return {
+    dueDate: customerSupplied ? "" : normalizeUploadedDate(text),
+    customerSupplied,
+    comments: obsolete ? OBSOLETE_COMMENT : "",
+  };
+}
+
+function shortageItemsFromRecords(records: Record<string, unknown>[]) {
+  return records.reduce<ShortageItem[]>((items, row) => {
+      const normalized = Object.fromEntries(
+        Object.entries(row).map(([key, value]) => [normalizeHeading(key), value]),
+      );
+      const dueValue = String(
+        normalized.duedate || normalized.due || normalized.eta || "",
+      );
+      const pnNumber = String(
+        normalized.manufacturerpartno ||
+          normalized.pn ||
+          normalized.pnnumber ||
+          normalized.partnumber ||
+          "",
+      );
+      if (/\bpcb\b/i.test(dueValue) || /^\s*pcb(?:\b|[-_])/i.test(pnNumber)) {
+        return items;
+      }
+      const due = shortageDueMetadata(dueValue);
+      const item: ShortageItem = {
+        id: makeId("shortage"),
+        kspNumber: String(
+          normalized.kspartno || normalized.ksp || normalized.kspnumber || "",
+        ),
+        pnNumber,
+        quantity: String(
+          normalized.shortageqty || normalized.qty || normalized.quantity || "",
+        ),
+        dueDate: due.dueDate,
+        comments: due.comments,
+        customerSupplied: due.customerSupplied,
+        complete: false,
+      };
+      if (
+        item.kspNumber ||
+        item.pnNumber ||
+        item.quantity ||
+        item.dueDate ||
+        item.customerSupplied ||
+        item.comments
+      ) {
+        items.push(item);
+      }
+      return items;
+    }, []);
+}
+
+function shortageItemsFromClipboard(text: string) {
+  return shortageItemsFromRecords(clipboardTableRecords(text));
+}
+
 function parseShortageRowsFromTsv(
   tsv: string,
   greenBands: Array<{ top: number; bottom: number }> = [],
@@ -7957,7 +8397,7 @@ function parseShortageRowsFromTsv(
     }
   }
 
-  return groupedRows
+  const parsedRows = groupedRows
     .map((row) => {
       const rowCenter =
         row.reduce(
@@ -7989,14 +8429,11 @@ function parseShortageRowsFromTsv(
           .map((word) => cleanImportedCell(word.text))
           .join(" ")
           .trim();
-      const dueValue = value("dueDate");
-      const customerSupplied = /customer\s*supplied/i.test(
-        dueValue,
-      );
       const kspNumber = value("kspNumber");
       const pnNumber = value("pnNumber");
       const quantity =
         value("quantity").match(/\d+(?:\.\d+)?/)?.[0] ?? "";
+      const dueValue = value("dueDate");
       if (
         /\bpcb\b/i.test(dueValue) ||
         /^\s*pcb(?:\b|[-_])/i.test(pnNumber) ||
@@ -8005,24 +8442,57 @@ function parseShortageRowsFromTsv(
         return null;
       }
       return {
-        id: makeId("shortage"),
         kspNumber,
         pnNumber,
         quantity,
-        dueDate: customerSupplied ? "" : normalizeUploadedDate(dueValue),
-        comments: "",
-        customerSupplied,
-        complete: false,
+        dueValue,
       };
     })
-    .filter((item): item is ShortageItem => Boolean(item))
+    .filter(
+      (
+        item,
+      ): item is {
+        kspNumber: string;
+        pnNumber: string;
+        quantity: string;
+        dueValue: string;
+      } => Boolean(item),
+    );
+
+  const combinedRows: typeof parsedRows = [];
+  parsedRows.forEach((row) => {
+    const isDueContinuation =
+      !row.kspNumber && !row.pnNumber && !row.quantity && Boolean(row.dueValue);
+    const previous = combinedRows.at(-1);
+    if (isDueContinuation && previous) {
+      previous.dueValue = `${previous.dueValue} ${row.dueValue}`.trim();
+      return;
+    }
+    combinedRows.push(row);
+  });
+
+  return combinedRows
+    .map((row) => {
+      const due = shortageDueMetadata(row.dueValue);
+      return {
+        id: makeId("shortage"),
+        kspNumber: row.kspNumber,
+        pnNumber: row.pnNumber,
+        quantity: row.quantity,
+        dueDate: due.dueDate,
+        comments: due.comments,
+        customerSupplied: due.customerSupplied,
+        complete: false,
+      } satisfies ShortageItem;
+    })
     .filter(
       (item) =>
         item.kspNumber ||
         item.pnNumber ||
         item.quantity ||
         item.dueDate ||
-        item.customerSupplied,
+        item.customerSupplied ||
+        item.comments,
     );
 }
 
@@ -8031,18 +8501,36 @@ async function parseShortageFile(file: File): Promise<ShortageItem[]> {
     const { text, tsv, greenBands } = await recognizeScreenshotData(file, "4");
     const tableRows = parseShortageRowsFromTsv(tsv, greenBands);
     if (tableRows.length) return tableRows;
-    return text
+    const parsedItems: ShortageItem[] = [];
+    text
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter((line) => line && !/ksp.*pn.*(?:qty|quantity).*due/i.test(line))
-      .map((line) => {
+      .forEach((line) => {
+        const due = shortageDueMetadata(line);
+        if (
+          /^(?:backorder|obsolete|customer\s*supplied)\b/i.test(line) &&
+          parsedItems.length
+        ) {
+          const previous = parsedItems.at(-1)!;
+          parsedItems[parsedItems.length - 1] = {
+            ...previous,
+            customerSupplied:
+              previous.customerSupplied || due.customerSupplied,
+            dueDate: due.customerSupplied ? "" : previous.dueDate,
+            comments: due.comments || previous.comments,
+          };
+          return;
+        }
         const dateMatch = line.match(
           /\b(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})\b/,
         );
-        const dueDate = normalizeUploadedDate(dateMatch?.[0] ?? "");
-        const withoutDate = dateMatch
+        const withoutDate = (dateMatch
           ? line.replace(dateMatch[0], "").trim()
-          : line;
+          : line
+        )
+          .replace(/\b(?:BACKORDER|OBSOLETE|CUSTOMER\s*SUPPLIED)\b/gi, "")
+          .trim();
         const columns = withoutDate
           .split(/\s{2,}|\t/)
           .map((value) => value.trim())
@@ -8051,7 +8539,7 @@ async function parseShortageFile(file: File): Promise<ShortageItem[]> {
         const quantityIndex = fallback.findIndex((value, index) =>
           index > 1 ? /^\d+(?:\.\d+)?$/.test(value) : false,
         );
-        return {
+        const item = {
           id: makeId("shortage"),
           kspNumber: columns[0] ?? fallback[0] ?? "",
           pnNumber:
@@ -8061,16 +8549,23 @@ async function parseShortageFile(file: File): Promise<ShortageItem[]> {
               : fallback.slice(1).join(" ")),
           quantity:
             columns[2] ?? (quantityIndex > 1 ? fallback[quantityIndex] : ""),
-          dueDate,
-          comments: "",
-          customerSupplied: /customer\s*supplied/i.test(line),
+          dueDate: due.dueDate,
+          comments: due.comments,
+          customerSupplied: due.customerSupplied,
           complete: false,
-        };
-      })
-      .filter(
-        (item) =>
-          item.kspNumber || item.pnNumber || item.quantity || item.dueDate,
-      );
+        } satisfies ShortageItem;
+        if (
+          item.kspNumber ||
+          item.pnNumber ||
+          item.quantity ||
+          item.dueDate ||
+          item.comments ||
+          item.customerSupplied
+        ) {
+          parsedItems.push(item);
+        }
+      });
+    return parsedItems;
   }
 
   const workbook = XLSX.read(await file.arrayBuffer(), {
@@ -8081,55 +8576,7 @@ async function parseShortageFile(file: File): Promise<ShortageItem[]> {
     workbook.Sheets[workbook.SheetNames[0]],
     { defval: "" },
   );
-  return rows
-    .map((row) => {
-      const normalized = Object.fromEntries(
-        Object.entries(row).map(([key, value]) => [
-          normalizeHeading(key),
-          value,
-        ]),
-      );
-      const dueValue = String(normalized.duedate || "");
-      const pnNumber = String(
-        normalized.manufacturerpartno ||
-          normalized.pn ||
-          normalized.pnnumber ||
-          normalized.partnumber ||
-          "",
-      );
-      if (
-        /\bpcb\b/i.test(dueValue) ||
-        /^\s*pcb(?:\b|[-_])/i.test(pnNumber)
-      ) {
-        return null;
-      }
-      const customerSupplied = /customer\s*supplied/i.test(dueValue);
-      return {
-        id: makeId("shortage"),
-        kspNumber: String(
-          normalized.kspartno ||
-            normalized.ksp ||
-            normalized.kspnumber ||
-            "",
-        ),
-        pnNumber,
-        quantity: String(
-          normalized.shortageqty ||
-            normalized.qty ||
-            normalized.quantity ||
-            "",
-        ),
-        dueDate: customerSupplied ? "" : normalizeUploadedDate(dueValue),
-        comments: "",
-        customerSupplied,
-        complete: false,
-      };
-    })
-    .filter((item): item is ShortageItem => Boolean(item))
-    .filter(
-      (item) =>
-        item.kspNumber || item.pnNumber || item.quantity || item.dueDate,
-    );
+  return shortageItemsFromRecords(rows);
 }
 
 function OldDataImportModal({
@@ -8146,6 +8593,7 @@ function OldDataImportModal({
   const [rows, setRows] = useState<LegacyImportRow[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
   const [scanState, setScanState] = useState("");
+  const [oldDataPaste, setOldDataPaste] = useState("");
   const uploadRef = useRef<HTMLInputElement>(null);
   const current = rows[activeIndex] ?? null;
   const missing = current ? legacyMissingFields(current) : [];
@@ -8154,6 +8602,13 @@ function OldDataImportModal({
   const needsInfoCount = rows.filter(
     (row) => !row.booked && (!row.division || legacyMissingFields(row).length),
   ).length;
+  const blockedByPendingPcba = Boolean(
+    current?.fields.jobNumber.trim().startsWith("5") &&
+      rows.some(
+        (row) =>
+          !row.booked && !row.fields.jobNumber.trim().startsWith("5"),
+      ),
+  );
   const familySuggestions = useMemo(
     () =>
       Array.from(
@@ -8165,6 +8620,36 @@ function OldDataImportModal({
       ).sort((a, b) => a.localeCompare(b)),
     [jobs],
   );
+  const customerSuggestions = Array.from(
+    new Set(
+      jobs
+        .filter(
+          (job) => !current?.division || job.division === current.division,
+        )
+        .map((job) => job.customer.trim())
+        .filter(Boolean),
+    ),
+  ).sort((a, b) => a.localeCompare(b));
+  const eligibleLinkedJobs = (() => {
+    if (!current || current.buildLevel === "PCBA") return [];
+    const customer = current.fields.customer.trim().toLowerCase();
+    return jobs
+      .filter((job) => {
+        const level = jobBuildLevel(job);
+        const validLevel =
+          current.buildLevel === "CCA"
+            ? level === "PCBA"
+            : level === "CCA" || level === "PCBA";
+        return (
+          validLevel &&
+          job.division === current.division &&
+          job.customer.trim().toLowerCase() === customer
+        );
+      })
+      .sort((a, b) =>
+        a.jobNumber.localeCompare(b.jobNumber, undefined, { numeric: true }),
+      );
+  })();
 
   function applyProfiles(imported: LegacyImportRow[]) {
     return imported.map((row) => {
@@ -8219,7 +8704,7 @@ function OldDataImportModal({
           "No project rows were detected. Keep the headers visible and try a clearer image or Excel file.",
         );
       } else {
-        setRows(applyProfiles(imported));
+        setRows(sortLegacyBookingRows(applyProfiles(imported)));
         setActiveIndex(0);
         setScanState(
           `${imported.length} job${imported.length === 1 ? "" : "s"} detected. Review and confirm each booking.`,
@@ -8232,6 +8717,33 @@ function OldDataImportModal({
       );
     }
     event.target.value = "";
+  }
+
+  function importPastedOldData(text = oldDataPaste) {
+    try {
+      const imported = clipboardTableRecords(text)
+        .map((record, index) => legacyRowFromRecord(record, index + 2))
+        .filter((row): row is LegacyImportRow => Boolean(row));
+      if (!imported.length) {
+        setRows([]);
+        setScanState(
+          "No old job rows were detected. Include the Excel header row and try again.",
+        );
+        return;
+      }
+      const prepared = sortLegacyBookingRows(applyProfiles(imported));
+      setOldDataPaste(text);
+      setRows(prepared);
+      setActiveIndex(0);
+      setScanState(
+        `${prepared.length} pasted job${prepared.length === 1 ? "" : "s"} detected. Job numbers beginning with 1 are first; job numbers beginning with 5 are last.`,
+      );
+    } catch {
+      setRows([]);
+      setScanState(
+        "The pasted Excel table could not be read. Include the header row and try again.",
+      );
+    }
   }
 
   function updateCurrentField<Key extends keyof JobDraft>(
@@ -8291,11 +8803,19 @@ function OldDataImportModal({
   }
 
   function updateCurrentClassification(
-    change: Partial<Pick<LegacyImportRow, "buildLevel" | "familyName">>,
+    change: Partial<
+      Pick<LegacyImportRow, "buildLevel" | "familyName" | "linkedJobIds">
+    >,
   ) {
     setRows((allRows) =>
       allRows.map((row, index) =>
-        index === activeIndex ? { ...row, ...change } : row,
+        index === activeIndex
+          ? {
+              ...row,
+              ...change,
+              ...(change.buildLevel === "PCBA" ? { linkedJobIds: [] } : {}),
+            }
+          : row,
       ),
     );
   }
@@ -8307,6 +8827,12 @@ function OldDataImportModal({
 
   function confirmBooking() {
     if (!current || current.booked) return;
+    if (blockedByPendingPcba) {
+      setScanState(
+        "Book every Job# not beginning with 5 first. Job# entries beginning with 5 are always the final booking group.",
+      );
+      return;
+    }
     if (missing.length || missingDivision) {
       const labels = [
         ...(missingDivision ? ["Business section"] : []),
@@ -8318,14 +8844,39 @@ function OldDataImportModal({
       return;
     }
     const fields = current.fields;
-    const familyName = current.familyName.trim();
-    const familyId = familyName
+    const linkedJobs = eligibleLinkedJobs.filter((job) =>
+      current.linkedJobIds.includes(job.id),
+    );
+    const inheritedFamily = linkedJobs.find((job) => job.familyId);
+    const familyName =
+      current.familyName.trim() || inheritedFamily?.projectFamilyName || "";
+    const familyId = inheritedFamily?.familyId || (familyName
       ? `old-family:${normalizeHeading(
           `${current.division}:${fields.customer}:${familyName}`,
         )}`
-      : undefined;
+      : undefined);
+    const assemblyRequirements = Array.from(
+      linkedJobs
+        .reduce((requirements, linkedJob) => {
+          const key = `${jobBuildLevel(linkedJob)}|${linkedJob.pn.trim().toLowerCase()}|${linkedJob.rev.trim().toLowerCase()}`;
+          if (!requirements.has(key)) {
+            requirements.set(key, {
+              id: makeId("job-requirement"),
+              inputLevel: jobBuildLevel(linkedJob) as Exclude<BuildLevel, "LRU">,
+              ksid: linkedJob.ksid,
+              pnName: linkedJob.pnName,
+              pn: linkedJob.pn,
+              rev: linkedJob.rev,
+              quantityPerAssembly: 1,
+            });
+          }
+          return requirements;
+        }, new Map<string, AssemblyRequirement>())
+        .values(),
+    );
     const job: Job = {
       id: makeId("job"),
+      entryMethod: "old-data",
       buildLevel: current.buildLevel,
       familyId,
       projectFamilyName: familyName,
@@ -8353,8 +8904,8 @@ function OldDataImportModal({
             ? "Waiting for PCBA"
             : "Waiting for CCAs",
       assemblyRecipeId: "",
-      assemblyRequirements: [],
-      linkedJobIds: [],
+      assemblyRequirements,
+      linkedJobIds: linkedJobs.map((job) => job.id),
       completedQuantity: 0,
       quantityReleases: [],
       mechanicalShipments: [],
@@ -8458,6 +9009,46 @@ function OldDataImportModal({
             onChange={importOldData}
           />
         </div>
+        <details className="excel-paste-disclosure">
+          <summary>
+            <span>
+              <FileSpreadsheet size={16} />
+              <strong>Paste table from Excel</strong>
+            </span>
+            <small>OLD DATA Production Booking · click to expand or collapse</small>
+            <ChevronDown size={16} aria-hidden="true" />
+          </summary>
+          <div className="excel-paste-import old-data-paste-import">
+            <div>
+              <small>
+                Select the headers and all job rows in Excel, press CTRL+C, then
+                CTRL+V here. Job# entries beginning with 1 are reviewed first and
+                Job# entries beginning with 5 are held until last.
+              </small>
+            </div>
+            <textarea
+              aria-label="Paste Excel table for OLD DATA Production Booking"
+              value={oldDataPaste}
+              onChange={(event) => setOldDataPaste(event.target.value)}
+              onPaste={(event) => {
+                const text = event.clipboardData.getData("text/plain");
+                if (!text) return;
+                event.preventDefault();
+                importPastedOldData(text);
+              }}
+              placeholder={'Customer Sub-Category / Folder\tJob #\tKSID\tPN Name\tPN#\tREV\tQTY'}
+              rows={3}
+            />
+            <button
+              type="button"
+              className="button secondary small"
+              onClick={() => importPastedOldData()}
+              disabled={!oldDataPaste.trim()}
+            >
+              <FileSpreadsheet size={15} /> Import pasted jobs
+            </button>
+          </div>
+        </details>
 
         {!rows.length ? (
           <div className="legacy-empty-state">
@@ -8600,12 +9191,70 @@ function OldDataImportModal({
                       Jobs with the same family name, customer folder, and business section are linked together.
                     </small>
                   </label>
+                  {current.buildLevel !== "PCBA" && (
+                    <div className="old-data-linked-jobs">
+                      <strong>
+                        Attach existing {current.buildLevel === "CCA" ? "PCBA" : "CCA / PCBA"} jobs
+                      </strong>
+                      <small>
+                        Only jobs in this same customer sub-category folder and
+                        business section are shown.
+                      </small>
+                      {eligibleLinkedJobs.length ? (
+                        <div>
+                          {eligibleLinkedJobs.map((job) => (
+                            <label key={job.id}>
+                              <input
+                                type="checkbox"
+                                checked={current.linkedJobIds.includes(job.id)}
+                                onChange={(event) =>
+                                  updateCurrentClassification({
+                                    linkedJobIds: event.target.checked
+                                      ? Array.from(
+                                          new Set([...current.linkedJobIds, job.id]),
+                                        )
+                                      : current.linkedJobIds.filter(
+                                          (id) => id !== job.id,
+                                        ),
+                                  })
+                                }
+                              />
+                              <span>
+                                <strong>
+                                  {jobBuildLevel(job)} Job #{job.jobNumber}
+                                </strong>
+                                <small>
+                                  {job.ksid || "No KSID"} · {job.pnName || job.pn}
+                                </small>
+                              </span>
+                            </label>
+                          ))}
+                        </div>
+                      ) : (
+                        <em>
+                          Book the matching PCBA/CCA jobs in this customer folder
+                          first, then return to this mechanical job.
+                        </em>
+                      )}
+                    </div>
+                  )}
                 </fieldset>
 
                 <div className="job-form-grid legacy-job-grid">
                   <label className={`wide ${fieldClass("customer")}`}>
                     Customer Sub-Category / Folder {missingMark("customer")}
-                    <input disabled={current.booked} value={current.fields.customer} onChange={(event) => updateCurrentField("customer", event.target.value)} />
+                    <input
+                      disabled={current.booked}
+                      list="old-data-customer-options"
+                      value={current.fields.customer}
+                      onChange={(event) => updateCurrentField("customer", event.target.value)}
+                      placeholder="Select an existing folder or type a new one"
+                    />
+                    <datalist id="old-data-customer-options">
+                      {customerSuggestions.map((customer) => (
+                        <option key={customer} value={customer} />
+                      ))}
+                    </datalist>
                   </label>
                   <label className={fieldClass("jobNumber")}>
                     Job # {missingMark("jobNumber")}
@@ -8686,6 +9335,12 @@ function OldDataImportModal({
             )}
 
             <div className="legacy-review-actions">
+              {blockedByPendingPcba && (
+                <p className="legacy-booking-order-warning">
+                  Book all Job# entries not beginning with 5 before booking this
+                  final Job# group. Job# entries beginning with 1 remain first.
+                </p>
+              )}
               <button className="button secondary" onClick={() => goTo(-1)}>
                 <ChevronLeft size={17} /> Previous job
               </button>
@@ -8695,7 +9350,7 @@ function OldDataImportModal({
               </button>
               <button
                 className="button primary confirm-legacy-job"
-                disabled={Boolean(current?.booked)}
+                disabled={Boolean(current?.booked) || blockedByPendingPcba}
                 onClick={confirmBooking}
               >
                 {current?.booked ? <><CheckCircle2 size={17} /> Job booked</> : <><Check size={17} /> Confirm & book this job</>}
@@ -8733,6 +9388,7 @@ function NewJobModal({
     new Set(),
   );
   const uploadRef = useRef<HTMLInputElement>(null);
+  const [projectPaste, setProjectPaste] = useState("");
   const [fields, setFields] = useState<JobDraft>({
     customer: "",
     jobNumber: "",
@@ -9247,81 +9903,7 @@ function NewJobModal({
           workbook.Sheets[workbook.SheetNames[0]],
           { defval: "" },
         );
-        const row = Object.fromEntries(
-          Object.entries(rows[0] ?? {}).map(([key, value]) => [
-            normalizeHeading(key),
-            value,
-          ]),
-        );
-        const value = (...keys: string[]) =>
-          keys
-            .map((key) => row[normalizeHeading(key)])
-            .find((item) => item !== undefined && String(item).trim()) ?? "";
-        const divisionValue = String(value("Division", "Business Section"));
-        const typeValue = String(value("Project Type", "Type"));
-        const statusValue = String(value("Status"));
-        const special = String(value("Special Processes", "Special Process"));
-        parsed = {
-          division: /aerospace/i.test(divisionValue)
-            ? "Aerospace"
-            : /commercial/i.test(divisionValue)
-              ? "Commercial"
-              : undefined,
-          customer: String(
-            value("Customer Sub-Category", "Customer", "Customer Name"),
-          ),
-          jobNumber: String(value("Job #", "Job Number", "Job No")),
-          ksid: String(value("KSID")),
-          pnName: String(value("PN Name", "Part Name", "Job Name")),
-          pn: String(value("PN", "Part Number", "Part #")),
-          rev: String(value("Rev", "Revision")),
-          quantity: String(value("QTY", "Quantity")),
-          projectType:
-            projectTypes.find(
-              (item) => item.toLowerCase() === typeValue.toLowerCase(),
-            ) ??
-            matchingProjectType(value("Job Type", "Job Types")),
-          contact: String(value("Contact", "POC", "Point of Contact")),
-          customerDueDate: normalizeUploadedDate(
-            value("Customer Due Date", "Due Date"),
-          ),
-          poNumber: String(value("PO#", "PO Number", "PO")),
-          quoteNumber: String(value("Quote#", "Quote Number", "Quote")),
-          status:
-            jobStatuses.find(
-              (item) => item.toLowerCase() === statusValue.toLowerCase(),
-            ) ?? "",
-          createdDate: normalizeUploadedDate(
-            value("Project Creation Date", "Creation Date"),
-          ),
-          fabricationTurnDays:
-            String(value("Fabrication Turn Time", "Fab Turn Time")).match(
-              /\d+/,
-            )?.[0] ?? "",
-          assemblyTurnDays:
-            String(value("Assembly Turn Time")).match(/\d+/)?.[0] ?? "",
-          polymericsTurnDays:
-            String(value("Polymerics Turn Time")).match(/\d+/)?.[0] ?? "",
-          externalTestingTurnDays:
-            String(value("External Testing Turn Time")).match(/\d+/)?.[0] ?? "",
-          smtDays:
-            String(value("SMT Turn Time", "SMT Days")).match(/\d+/)?.[0] ?? "",
-          polymerics:
-            /polymerics/i.test(special) ||
-            Boolean(value("Polymerics Turn Time")),
-          externalTesting:
-            /external testing/i.test(special) ||
-            Boolean(value("External Testing Turn Time")),
-          faiReport: /\bfai\s*report\b/i.test(special),
-          otherProcess: /\bother(?:s)?\b/i.test(special),
-          otherSpecialProcess: String(
-            value("Other Special Process", "Others", "Other"),
-          ),
-          otherSpecialProcessTurnDays:
-            String(value("Other Turn Time", "Others Turn Time")).match(
-              /\d+/,
-            )?.[0] ?? "",
-        };
+        parsed = projectDraftFromRecord(rows[0] ?? {});
       }
       applyParsedFields(parsed);
       setScanState("Upload read. Complete every field marked in red.");
@@ -9333,6 +9915,27 @@ function NewJobModal({
       setDivisionMissing(true);
     }
     event.target.value = "";
+  }
+
+  function importPastedProject(text = projectPaste) {
+    try {
+      const records = clipboardTableRecords(text);
+      if (!records.length) {
+        setScanState("No Excel rows were detected in the pasted table.");
+        return;
+      }
+      applyParsedFields(projectDraftFromRecord(records[0]));
+      setProjectPaste(text);
+      setScanState(
+        records.length === 1
+          ? "Excel row pasted. Review the auto-filled project fields."
+          : `${records.length} Excel rows detected. The first row filled this New Project form; use OLD DATA Production Booking for a multi-job batch.`,
+      );
+    } catch {
+      setScanState(
+        "The pasted table could not be read. Include the Excel header row and try again.",
+      );
+    }
   }
 
   function submit(event: FormEvent<HTMLFormElement>) {
@@ -9374,6 +9977,7 @@ function NewJobModal({
             : 0;
         return normalizeJob({
           id: linkedIds[index],
+          entryMethod: "new-project",
           buildLevel: draft.level,
           familyId,
           projectFamilyName:
@@ -9481,8 +10085,8 @@ function NewJobModal({
                   id: makeId("job-requirement"),
                   inputLevel:
                     mechanicalLevel === "CCA"
-                      ? ("PCBA" as BuildLevel)
-                      : ("CCA" as BuildLevel),
+                      ? "PCBA"
+                      : "CCA",
                   ksid: linkedJob.ksid,
                   pnName: linkedJob.pnName,
                   pn: linkedJob.pn,
@@ -9501,6 +10105,7 @@ function NewJobModal({
         .at(-1) ?? fields.createdDate;
       const job: Job = normalizeJob({
         id: makeId("job"),
+        entryMethod: "new-project",
         buildLevel: mechanicalLevel,
         familyId: makeId("mechanical-link"),
         linkedJobIds,
@@ -9586,6 +10191,7 @@ function NewJobModal({
     const familyId = makeId("project-family");
     const primaryJob: Job = {
       id: makeId("job"),
+      entryMethod: "new-project",
       buildLevel: "PCBA",
       familyId,
       assemblyRecipeId: "",
@@ -9652,6 +10258,7 @@ function NewJobModal({
       const mechanicalDays = Number(draftFields.assemblyTurnDays) || 0;
       return {
         id: makeId("job"),
+        entryMethod: "new-project",
         buildLevel: draft.level,
         familyId,
         assemblyRecipeId: recipe?.id ?? "",
@@ -9862,6 +10469,45 @@ function NewJobModal({
             onChange={importProject}
           />
         </div>
+        <details className="excel-paste-disclosure">
+          <summary>
+            <span>
+              <FileSpreadsheet size={16} />
+              <strong>Paste table from Excel</strong>
+            </span>
+            <small>New Project Entry · click to expand or collapse</small>
+            <ChevronDown size={16} aria-hidden="true" />
+          </summary>
+          <div className="excel-paste-import new-project-paste-import">
+            <div>
+              <small>
+                Copy the header row and project row in Excel, then press CTRL+V
+                here. The first data row fills this project entry.
+              </small>
+            </div>
+            <textarea
+              aria-label="Paste Excel table for New Project"
+              value={projectPaste}
+              onChange={(event) => setProjectPaste(event.target.value)}
+              onPaste={(event) => {
+                const text = event.clipboardData.getData("text/plain");
+                if (!text) return;
+                event.preventDefault();
+                importPastedProject(text);
+              }}
+              placeholder={'Customer Sub-Category / Folder\tJob #\tKSID\tPN Name\tPN#\tREV\tQTY'}
+              rows={3}
+            />
+            <button
+              type="button"
+              className="button secondary small"
+              onClick={() => importPastedProject()}
+              disabled={!projectPaste.trim()}
+            >
+              <FileSpreadsheet size={15} /> Import pasted row
+            </button>
+          </div>
+        </details>
         <section className="mechanical-preset-picker">
           <div>
             <strong>Preset Mechanical Config</strong>
@@ -10833,7 +11479,10 @@ function JobDrawer({
   const computedKryptonDockDate =
     buildLevel === "PCBA"
       ? kryptonDockDate(job)
-      : job.kryptonDockDateOverride || shipmentDates.at(-1) || job.dueDate;
+      : activePartialDockDate(job) ||
+        job.kryptonDockDateOverride ||
+        shipmentDates.at(-1) ||
+        initialKryptonDockDate(job);
   type Milestone = {
     key: string;
     name: string;
@@ -11373,11 +12022,7 @@ function JobDrawer({
     try {
       const items = await parseShortageFile(file);
       onUpdate({
-        shortages: reconcileShortageComments(
-          [...job.shortages, ...items],
-          job.pcbDockDate,
-          job.createdDate,
-        ),
+        shortages: mergeImportedShortages(job, items),
         noShortageList: false,
         allPartsReceivedDate: "",
         status: job.status === "Kitting" ? "Waiting on Parts" : job.status,
