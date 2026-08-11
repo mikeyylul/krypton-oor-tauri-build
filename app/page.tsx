@@ -2951,6 +2951,7 @@ export default function Home() {
             recipes={assemblyRecipes}
             onChange={setAssemblyRecipes}
             ksidProfiles={ksidProfiles}
+            customersByDivision={customersByDivision}
             onBack={() => setActiveView("integrations")}
             notify={notify}
           />
@@ -6482,8 +6483,8 @@ function IntegrationsView({
             <p>
               Save KSID-linked CCA and LRU configurations. Applying a preset to
               New Project fills the business section, customer folder, PN Name,
-              PN#, Rev, contact, and assembly settings while leaving Job#, QTY,
-              PO#, and Quote# for manual entry.
+              PN#, Rev, contact, assembly settings, and configured quantities
+              while leaving Job#, PO#, and Quote# for manual entry.
             </p>
           </div>
           <button
@@ -6595,12 +6596,14 @@ function AssemblyConfigurationsView({
   recipes,
   onChange,
   ksidProfiles,
+  customersByDivision,
   onBack,
   notify,
 }: {
   recipes: AssemblyRecipe[];
   onChange: (recipes: AssemblyRecipe[]) => void;
   ksidProfiles: KsidProfile[];
+  customersByDivision: Record<Division, string[]>;
   onBack: () => void;
   notify: (message: string) => void;
 }) {
@@ -6615,7 +6618,9 @@ function AssemblyConfigurationsView({
   const [outputPn, setOutputPn] = useState("");
   const [outputRev, setOutputRev] = useState("");
   const [contact, setContact] = useState("");
-  const [assemblyTurnDays, setAssemblyTurnDays] = useState(1);
+  const [assemblyTurnDays, setAssemblyTurnDays] = useState(
+    defaultMechanicalAssemblyDays("CCA"),
+  );
   const [requirements, setRequirements] = useState<AssemblyRequirement[]>([
     {
       id: makeId("requirement"),
@@ -6631,13 +6636,16 @@ function AssemblyConfigurationsView({
     () =>
       [
         ...new Set(
-          ksidProfiles
+          [
+            ...customersByDivision[division],
+            ...ksidProfiles
             .filter((profile) => profile.division === division)
-            .map((profile) => profile.customer.trim())
+            .map((profile) => profile.customer.trim()),
+          ]
             .filter(Boolean),
         ),
       ].sort((a, b) => a.localeCompare(b)),
-    [division, ksidProfiles],
+    [customersByDivision, division, ksidProfiles],
   );
 
   function clearForm(level: AssemblyRecipe["outputLevel"] = outputLevel) {
@@ -6650,7 +6658,7 @@ function AssemblyConfigurationsView({
     setOutputPn("");
     setOutputRev("");
     setContact("");
-    setAssemblyTurnDays(1);
+    setAssemblyTurnDays(defaultMechanicalAssemblyDays(level));
     setRequirements([
       {
         id: makeId("requirement"),
@@ -6666,6 +6674,7 @@ function AssemblyConfigurationsView({
 
   function changeLevel(level: AssemblyRecipe["outputLevel"]) {
     setOutputLevel(level);
+    setAssemblyTurnDays(defaultMechanicalAssemblyDays(level));
     setRequirements((current) =>
       current.map((item) => ({
         ...item,
@@ -7358,6 +7367,7 @@ type LinkedBuildDraft = {
   id: string;
   level: BuildLevel;
   recipeId: string;
+  quantityMultiplier: number;
   fields: JobDraft;
 };
 
@@ -7438,6 +7448,7 @@ function linkedBuildDraft(level: BuildLevel, inherited: JobDraft): LinkedBuildDr
     id: makeId(`${level.toLowerCase()}-draft`),
     level,
     recipeId: "",
+    quantityMultiplier: 1,
     fields: {
       ...emptyLegacyDraft(),
       customer: inherited.customer,
@@ -7458,6 +7469,10 @@ function linkedBuildDraft(level: BuildLevel, inherited: JobDraft): LinkedBuildDr
       smtDays: level === "PCBA" ? inherited.smtDays || "2" : "1",
     },
   };
+}
+
+function defaultMechanicalAssemblyDays(level: Exclude<BuildLevel, "PCBA">) {
+  return level === "CCA" ? 5 : 2;
 }
 
 function cleanImportedCell(value: unknown) {
@@ -9501,7 +9516,8 @@ function NewJobModal({
 
   function applyMechanicalPreset(recipe: AssemblyRecipe) {
     const generated: LinkedBuildDraft[] = [];
-    const seen = new Set<string>();
+    const generatedByKey = new Map<string, LinkedBuildDraft>();
+    const topQuantity = Math.max(1, Number(fields.quantity) || 1);
     const inherited: JobDraft = {
       ...fields,
       customer: recipe.customer,
@@ -9519,6 +9535,7 @@ function NewJobModal({
         "ksid" | "pnName" | "pn" | "rev"
       >,
       matchedRecipe?: AssemblyRecipe,
+      quantityMultiplier = 1,
     ) {
       const profile = ksidProfileFor(requirement.ksid, ksidProfiles);
       const ksid = requirement.ksid || matchedRecipe?.outputKsid || profile?.ksid || "";
@@ -9528,39 +9545,49 @@ function NewJobModal({
       const key = `${level}|${normalizeKsid(ksid) || pn.trim().toLowerCase()}|${rev
         .trim()
         .toLowerCase()}`;
-      if (seen.has(key)) return;
-      seen.add(key);
-
-      const draft = linkedBuildDraft(level, inherited);
-      draft.recipeId = matchedRecipe?.id ?? "";
-      draft.fields = {
-        ...draft.fields,
-        customer: recipe.customer,
-        jobNumber: "",
-        ksid,
-        pnName:
-          requirement.pnName ||
-          matchedRecipe?.pnName ||
-          profile?.pnName ||
+      let draft = generatedByKey.get(key);
+      if (draft) {
+        draft.quantityMultiplier += quantityMultiplier;
+        draft.fields.quantity = String(
+          topQuantity * draft.quantityMultiplier,
+        );
+      } else {
+        draft = linkedBuildDraft(level, inherited);
+        draft.recipeId = matchedRecipe?.id ?? "";
+        draft.quantityMultiplier = quantityMultiplier;
+        draft.fields = {
+          ...draft.fields,
+          customer: recipe.customer,
+          jobNumber: "",
+          ksid,
+          pnName:
+            requirement.pnName ||
+            matchedRecipe?.pnName ||
+            profile?.pnName ||
+            pn,
           pn,
-        pn,
-        rev,
-        quantity: "",
-        projectType: level === "PCBA" ? "New" : "Assembly Only",
-        contact: recipe.contact,
-        poNumber: "",
-        quoteNumber: "",
-        status:
-          level === "PCBA"
-            ? "Waiting on Parts"
-            : level === "CCA"
-              ? "Waiting for PCBA"
-              : "Waiting for CCAs",
-        fabricationTurnDays: "0",
-        assemblyTurnDays: String(matchedRecipe?.assemblyTurnDays ?? 0),
-        smtDays: level === "PCBA" ? "1" : "1",
-      };
-      generated.push(draft);
+          rev,
+          quantity: String(topQuantity * quantityMultiplier),
+          projectType: level === "PCBA" ? "New" : "Assembly Only",
+          contact: recipe.contact,
+          poNumber: "",
+          quoteNumber: "",
+          status:
+            level === "PCBA"
+              ? "Waiting on Parts"
+              : level === "CCA"
+                ? "Waiting for PCBA"
+                : "Waiting for CCAs",
+          fabricationTurnDays: "0",
+          assemblyTurnDays:
+            level === "PCBA"
+              ? "0"
+              : String(defaultMechanicalAssemblyDays(level)),
+          smtDays: "1",
+        };
+        generatedByKey.set(key, draft);
+        generated.push(draft);
+      }
 
       matchedRecipe?.requirements.forEach((child) => {
         const childRecipe = recipes.find(
@@ -9576,7 +9603,13 @@ function NewJobModal({
                   candidate.outputRev.trim().toLowerCase() ===
                     child.rev.trim().toLowerCase()))),
         );
-        addPresetJob(child.inputLevel, child, childRecipe);
+        addPresetJob(
+          child.inputLevel,
+          child,
+          childRecipe,
+          quantityMultiplier *
+            Math.max(1, Number(child.quantityPerAssembly) || 1),
+        );
       });
     }
 
@@ -9589,6 +9622,7 @@ function NewJobModal({
         rev: recipe.outputRev,
       },
       recipe,
+      1,
     );
 
     setPresetJobDrafts(generated);
@@ -9610,20 +9644,21 @@ function NewJobModal({
       pnName: recipe.pnName,
       pn: recipe.outputPn,
       rev: recipe.outputRev,
+      quantity: String(topQuantity),
       projectType: "Assembly Only",
       contact: recipe.contact,
       status:
         recipe.outputLevel === "CCA" ? "Waiting for PCBA" : "Waiting for CCAs",
       createdDate: chicagoDateKey(),
       fabricationTurnDays: "0",
-      assemblyTurnDays: String(recipe.assemblyTurnDays),
+      assemblyTurnDays: String(defaultMechanicalAssemblyDays(recipe.outputLevel)),
       smtDays: "1",
     }));
     setLinkedJobIds([]);
     setScanState(
       `${recipe.name} generated ${generated.length} separate editable job entr${
         generated.length === 1 ? "y" : "ies"
-      }. Enter Job# and QTY for each job; PO# and Quote# remain optional.`,
+      }. Quantities were calculated for QTY ${topQuantity} ${recipe.outputLevel}; every field remains editable.`,
     );
   }
 
@@ -9635,10 +9670,24 @@ function NewJobModal({
         typeof change.customer === "string" ? change.customer : null;
       const sharedContact =
         typeof change.contact === "string" ? change.contact : null;
+      const topQuantityChanged =
+        isTopAssembly && typeof change.quantity === "string";
+      const topQuantityText =
+        typeof change.quantity === "string" ? change.quantity : "";
+      const topQuantity = topQuantityChanged
+        ? Math.max(0, Number(topQuantityText) || 0)
+        : 0;
       return current.map((draft) => ({
         ...draft,
         fields: {
           ...draft.fields,
+          ...(topQuantityChanged
+            ? {
+                quantity: topQuantityText.trim()
+                  ? String(topQuantity * draft.quantityMultiplier)
+                  : "",
+              }
+            : {}),
           ...(draft.id === id ? change : {}),
           ...(sharedCustomer !== null ? { customer: sharedCustomer } : {}),
           ...(sharedContact !== null ? { contact: sharedContact } : {}),
@@ -10511,7 +10560,7 @@ function NewJobModal({
           <div>
             <strong>Preset Mechanical Config</strong>
             <small>
-              Applies all saved booking details except Job#, QTY, PO#, and Quote#.
+              Applies saved booking details and calculates every job QTY from the top assembly.
             </small>
           </div>
           <label className="mechanical-preset-dropdown">
@@ -10585,6 +10634,7 @@ function NewJobModal({
                 draft={presetJobDrafts[presetReviewIndex]}
                 index={presetReviewIndex}
                 recipes={recipes}
+                customerSuggestions={customerSuggestions}
                 onUpdate={(change) =>
                   updatePresetDraft(
                     presetJobDrafts[presetReviewIndex].id,
@@ -11229,6 +11279,7 @@ function LinkedBuildDraftCard({
   draft,
   index,
   recipes,
+  customerSuggestions = [],
   onUpdate,
   onRecipe,
   onKsid,
@@ -11239,6 +11290,7 @@ function LinkedBuildDraftCard({
   draft: LinkedBuildDraft;
   index: number;
   recipes: AssemblyRecipe[];
+  customerSuggestions?: string[];
   onUpdate: (change: Partial<JobDraft>) => void;
   onRecipe: (recipeId: string) => void;
   onKsid: (value: string) => void;
@@ -11246,6 +11298,7 @@ function LinkedBuildDraftCard({
   onCopyFamily: () => void;
   onRemove: () => void;
 }) {
+  const customerListId = `preset-customer-folders-${draft.id}`;
   const matchingRecipes = recipes.filter(
     (recipe) => recipe.outputLevel === draft.level,
   );
@@ -11314,7 +11367,17 @@ function LinkedBuildDraftCard({
       <div className="job-form-grid linked-job-grid">
         <label className={`wide ${required("customer")}`}>
           Customer Sub-Category / Folder
-          <input value={draft.fields.customer} onChange={(event) => set("customer", event.target.value)} />
+          <input
+            list={customerListId}
+            value={draft.fields.customer}
+            onChange={(event) => set("customer", event.target.value)}
+            placeholder="Choose an existing folder or type a new one"
+          />
+          <datalist id={customerListId}>
+            {customerSuggestions.map((customer) => (
+              <option key={customer} value={customer} />
+            ))}
+          </datalist>
         </label>
         <label className={required("jobNumber")}>
           Job #
@@ -11435,7 +11498,14 @@ function JobDrawer({
   ].filter(
     (candidate, index, all) =>
       all.findIndex((item) => item.id === candidate.id) === index,
-  );
+  ).sort((a, b) => {
+    const levelOrder: Record<BuildLevel, number> = { PCBA: 0, CCA: 1, LRU: 2 };
+    return (
+      levelOrder[jobBuildLevel(a)] - levelOrder[jobBuildLevel(b)] ||
+      a.jobNumber.localeCompare(b.jobNumber, undefined, { numeric: true }) ||
+      a.id.localeCompare(b.id)
+    );
+  });
   const linkedMechanicalJobs = jobs.filter(
     (candidate) =>
       jobBuildLevel(candidate) !== "PCBA" &&
@@ -11621,17 +11691,6 @@ function JobDrawer({
         job.workflowCompleted.includes("krypton-dock") ||
         job.status === "Complete",
     },
-    ...jobs
-      .filter((candidate) => candidate.linkedJobIds?.includes(job.id))
-      .map((candidate) => ({
-        key: `mechanical-release-${candidate.id}`,
-        name: `Ready for ${jobBuildLevel(candidate)} Mechanical Assembly for MECH JOB #${candidate.jobNumber}`,
-        date: (job.quantityReleases ?? []).at(-1)?.date ?? "",
-        rule: `${job.completedQuantity ?? 0} completed QTY available · open the MECH JOB from Production Status`,
-        done: (job.completedQuantity ?? 0) > 0,
-        checkOnly: true,
-        locked: true,
-      })),
   ];
   const assemblyInputsReady = buildableQuantity > 0;
   const milestones: Milestone[] =
@@ -12407,12 +12466,6 @@ function JobDrawer({
                     {(job.quantityReleases ?? []).map((release) => <span key={release.id}>QTY {release.quantity} released {dateLabel(release.date)}</span>)}
                   </div>
                 )}
-                {linkedMechanicalJobs.map((candidate) => (
-                  <button type="button" className="linked-mech-open" key={candidate.id} onClick={() => onOpen(candidate.id)}>
-                    Ready for {jobBuildLevel(candidate)} Mechanical Assembly for MECH JOB #{candidate.jobNumber}
-                    <ChevronRight size={16} />
-                  </button>
-                ))}
               </div>
             ) : buildLevel !== "PCBA" ? (
               <div className="mechanical-production-panel">

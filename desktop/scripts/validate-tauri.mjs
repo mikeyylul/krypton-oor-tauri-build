@@ -110,21 +110,28 @@ for (const fragment of [
   "initialKryptonDockDate",
   "activePartialDockDate",
   "materialsReadyDate",
+  "quantityMultiplier",
+  "defaultMechanicalAssemblyDays",
+  "customerSuggestions={customerSuggestions}",
+  "Applies saved booking details and calculates every job QTY from the top assembly.",
   "customerFromDrop",
   'event.dataTransfer.setData("text/plain", payload)',
 ]) {
   if (!desktopSource.includes(fragment)) {
-    throw new Error(`Missing Version 65 workflow behavior: ${fragment}`);
+    throw new Error(`Missing Version 66 workflow behavior: ${fragment}`);
   }
 }
 
 if (desktopSource.includes("shortageExceedsFifteenBusinessDays")) {
   throw new Error("The removed 15-business-day shortage rule returned.");
 }
+if (desktopSource.includes("mechanical-release-")) {
+  throw new Error("The removed PCBA Ready for LRU/CCA control returned.");
+}
 if ((desktopSource.match(/<details className="excel-paste-disclosure">/g) ?? []).length !== 3) {
   throw new Error("All three Excel paste areas must remain collapsible.");
 }
 
 console.log(
-  "Validated Website Version 65 parity, Windows organization-folder drag-and-drop, native RFQ folder creation, local autosave identity, packaged photo OCR, and Tauri offline restrictions.",
+  "Validated Website Version 66 parity, preset quantity propagation, stable assembly structure, Windows organization-folder drag-and-drop, native RFQ folder creation, local autosave identity, packaged photo OCR, and Tauri offline restrictions.",
 );
