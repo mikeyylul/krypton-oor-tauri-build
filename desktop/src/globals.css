@@ -4283,6 +4283,53 @@ button:disabled {
   padding: 8px 9px;
   text-transform: none;
 }
+.existing-job-link-editor {
+  background: #f7f9fc;
+  border: 1px solid #dbe4ef;
+  border-radius: 10px;
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px;
+}
+.existing-job-link-editor > div:first-child,
+.existing-job-link-editor > div:first-child strong,
+.existing-job-link-editor > div:first-child small {
+  display: block;
+}
+.existing-job-link-editor small,
+.existing-job-link-editor > em {
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  margin-top: 3px;
+}
+.existing-job-link-list {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  max-height: 220px;
+  overflow: auto;
+}
+.existing-job-link-list > div {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 9px 10px;
+}
+.existing-job-link-list > div:last-child {
+  border-bottom: 0;
+}
+.existing-job-link-list span,
+.existing-job-link-list strong,
+.existing-job-link-list small {
+  display: block;
+}
+.existing-job-link-list .button {
+  flex-shrink: 0;
+}
 .pcb-dock-subsection {
   align-items: end;
   background: #f8fafc;

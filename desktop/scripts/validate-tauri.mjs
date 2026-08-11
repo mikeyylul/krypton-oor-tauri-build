@@ -116,9 +116,14 @@ for (const fragment of [
   "Applies saved booking details and calculates every job QTY from the top assembly.",
   "customerFromDrop",
   'event.dataTransfer.setData("text/plain", payload)',
+  "additionalAssemblyInputJobs",
+  "function addAssemblyInputJob",
+  'level === "CCA" || level === "PCBA"',
+  'key === "customer" && index > activeIndex && !row.booked',
+  'Add missed {buildLevel === "CCA" ? "PCBA" : "CCA / PCBA"} jobs',
 ]) {
   if (!desktopSource.includes(fragment)) {
-    throw new Error(`Missing Version 66 workflow behavior: ${fragment}`);
+    throw new Error(`Missing Version 67 workflow behavior: ${fragment}`);
   }
 }
 
@@ -133,5 +138,5 @@ if ((desktopSource.match(/<details className="excel-paste-disclosure">/g) ?? [])
 }
 
 console.log(
-  "Validated Website Version 66 parity, preset quantity propagation, stable assembly structure, Windows organization-folder drag-and-drop, native RFQ folder creation, local autosave identity, packaged photo OCR, and Tauri offline restrictions.",
+  "Validated Website Version 67 parity, LRU CCA/PCBA selection, editable existing assembly links, customer-folder propagation, Windows organization-folder drag-and-drop, native RFQ folder creation, local autosave identity, packaged photo OCR, and Tauri offline restrictions.",
 );

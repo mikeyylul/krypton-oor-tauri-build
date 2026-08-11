@@ -8767,7 +8767,9 @@ function OldDataImportModal({
   ) {
     setRows((allRows) =>
       allRows.map((row, index) => {
-        if (index !== activeIndex) return row;
+        const propagateCustomer =
+          key === "customer" && index > activeIndex && !row.booked;
+        if (index !== activeIndex && !propagateCustomer) return row;
         return {
           ...row,
           fields: {
@@ -8784,28 +8786,33 @@ function OldDataImportModal({
     const value = current.fields.ksid;
     const profile = ksidProfileFor(value, ksidProfiles);
     setRows((allRows) =>
-      allRows.map((row, index) =>
-        index !== activeIndex
-          ? row
-          : {
-              ...row,
-              division: profile?.division ?? row.division,
-              fields: {
-                ...row.fields,
-                ...(profile
-                  ? {
-                      customer: profile.customer,
-                      pnName: profile.pnName,
-                      pn: profile.pn,
-                      rev: profile.rev,
-                      contact: profile.contact,
-                    }
-                  : !value.trim()
-                    ? { customer: "", pnName: "", pn: "", rev: "", contact: "" }
-                    : {}),
-              },
-            },
-      ),
+      allRows.map((row, index) => {
+        if (profile && index > activeIndex && !row.booked) {
+          return {
+            ...row,
+            fields: { ...row.fields, customer: profile.customer },
+          };
+        }
+        if (index !== activeIndex) return row;
+        return {
+          ...row,
+          division: profile?.division ?? row.division,
+          fields: {
+            ...row.fields,
+            ...(profile
+              ? {
+                  customer: profile.customer,
+                  pnName: profile.pnName,
+                  pn: profile.pn,
+                  rev: profile.rev,
+                  contact: profile.contact,
+                }
+              : !value.trim()
+                ? { customer: "", pnName: "", pn: "", rev: "", contact: "" }
+                : {}),
+          },
+        };
+      }),
     );
   }
 
@@ -9450,11 +9457,18 @@ function NewJobModal({
     [jobs, division],
   );
 
-  const eligibleLinkedJobs = jobs.filter(
-    (job) =>
-      job.customer.trim().toLowerCase() === fields.customer.trim().toLowerCase() &&
-      jobBuildLevel(job) === (mechanicalLevel === "CCA" ? "PCBA" : "CCA"),
-  );
+  const eligibleLinkedJobs = jobs.filter((job) => {
+    const level = jobBuildLevel(job);
+    const validInputLevel =
+      mechanicalLevel === "CCA"
+        ? level === "PCBA"
+        : level === "CCA" || level === "PCBA";
+    return (
+      validInputLevel &&
+      job.division === division &&
+      job.customer.trim().toLowerCase() === fields.customer.trim().toLowerCase()
+    );
+  });
 
   const specialTurnDays =
     (polymerics ? Number(fields.polymericsTurnDays || 0) : 0) +
@@ -9668,7 +9682,9 @@ function NewJobModal({
       const source = current.find((draft) => draft.id === id);
       const isTopAssembly = current[0]?.id === id;
       const sharedCustomer =
-        typeof change.customer === "string" ? change.customer : null;
+        isTopAssembly && typeof change.customer === "string"
+          ? change.customer
+          : null;
       const sharedContact =
         typeof change.contact === "string" ? change.contact : null;
       const topQuantityChanged =
@@ -10113,7 +10129,7 @@ function NewJobModal({
     if (mechanicalBuild) {
       if (!linkedJobIds.length) {
         setScanState(
-          `Select at least one eligible ${mechanicalLevel === "CCA" ? "PCBA" : "CCA"} job from this customer folder.`,
+          `Select at least one eligible ${mechanicalLevel === "CCA" ? "PCBA" : "CCA or PCBA"} job from this customer folder.`,
         );
         return;
       }
@@ -10121,31 +10137,30 @@ function NewJobModal({
       const selectedRecipe = recipes.find(
         (recipe) => recipe.id === mechanicalRecipeId,
       );
-      const assemblyRequirements = selectedRecipe
-        ? selectedRecipe.requirements.map((requirement) => ({
-            ...requirement,
+      const requirementMap = new Map<string, AssemblyRequirement>();
+      selectedRecipe?.requirements.forEach((requirement) => {
+        const key = `${requirement.inputLevel}|${requirement.pn.trim().toLowerCase()}|${requirement.rev.trim().toLowerCase()}`;
+        requirementMap.set(key, {
+          ...requirement,
+          id: makeId("job-requirement"),
+        });
+      });
+      linked.forEach((linkedJob) => {
+        const inputLevel = jobBuildLevel(linkedJob) as Exclude<BuildLevel, "LRU">;
+        const key = `${inputLevel}|${linkedJob.pn.trim().toLowerCase()}|${linkedJob.rev.trim().toLowerCase()}`;
+        if (!requirementMap.has(key)) {
+          requirementMap.set(key, {
             id: makeId("job-requirement"),
-          }))
-        : Array.from(
-            linked.reduce((requirements, linkedJob) => {
-              const key = `${linkedJob.pn.trim().toLowerCase()}|${linkedJob.rev.trim().toLowerCase()}`;
-              if (!requirements.has(key)) {
-                requirements.set(key, {
-                  id: makeId("job-requirement"),
-                  inputLevel:
-                    mechanicalLevel === "CCA"
-                      ? "PCBA"
-                      : "CCA",
-                  ksid: linkedJob.ksid,
-                  pnName: linkedJob.pnName,
-                  pn: linkedJob.pn,
-                  rev: linkedJob.rev,
-                  quantityPerAssembly: 1,
-                });
-              }
-              return requirements;
-            }, new Map<string, AssemblyRequirement>()).values(),
-          );
+            inputLevel,
+            ksid: linkedJob.ksid,
+            pnName: linkedJob.pnName,
+            pn: linkedJob.pn,
+            rev: linkedJob.rev,
+            quantityPerAssembly: 1,
+          });
+        }
+      });
+      const assemblyRequirements = Array.from(requirementMap.values());
       const readyDate = linked
         .flatMap((job) => job.quantityReleases ?? [])
         .map((release) => release.date)
@@ -10782,12 +10797,12 @@ function NewJobModal({
                       }}
                     />
                     <strong>{level} Level</strong>
-                    <small>{level === "CCA" ? "Link completed PCBA jobs" : "Link completed CCA jobs"}</small>
+                    <small>{level === "CCA" ? "Link completed PCBA jobs" : "Link completed CCA and PCBA jobs"}</small>
                   </label>
                 ))}
               </fieldset>
               <div className="linked-job-selector">
-                <strong>Select linked {mechanicalLevel === "CCA" ? "PCBA" : "CCA"} jobs</strong>
+                <strong>Select linked {mechanicalLevel === "CCA" ? "PCBA" : "CCA / PCBA"} jobs</strong>
                 <small>Only jobs in the exact Customer Sub-Category / Folder are shown. Their PN# and REV become editable Assembly Config lines in this mechanical job.</small>
                 {!fields.customer.trim() && <em>Enter the Customer Sub-Category / Folder first.</em>}
                 {fields.customer.trim() && !eligibleLinkedJobs.length && <em>No eligible jobs are currently saved in this folder.</em>}
@@ -11512,6 +11527,31 @@ function JobDrawer({
       jobBuildLevel(candidate) !== "PCBA" &&
       linkedJobsFor(candidate, jobs).some((input) => input.id === job.id),
   );
+  const linkedFamilyIds = new Set(
+    linkedJobsFor(job, jobs).map((candidate) => candidate.id),
+  );
+  const additionalAssemblyInputJobs =
+    buildLevel === "PCBA"
+      ? []
+      : jobs
+          .filter((candidate) => {
+            const candidateLevel = jobBuildLevel(candidate);
+            const validInputLevel =
+              buildLevel === "CCA"
+                ? candidateLevel === "PCBA"
+                : candidateLevel === "CCA" || candidateLevel === "PCBA";
+            return (
+              candidate.id !== job.id &&
+              validInputLevel &&
+              !linkedFamilyIds.has(candidate.id) &&
+              candidate.division === job.division &&
+              candidate.customer.trim().toLowerCase() ===
+                job.customer.trim().toLowerCase()
+            );
+          })
+          .sort((a, b) =>
+            a.jobNumber.localeCompare(b.jobNumber, undefined, { numeric: true }),
+          );
   const requirementProgress = assemblyRequirementProgress(job, jobs);
   const assemblyRecipe = recipes.find((recipe) => recipe.id === job.assemblyRecipeId);
   const buildableQuantity = buildableAssemblyQuantity(job, jobs);
@@ -11899,6 +11939,37 @@ function JobDrawer({
         requirement.id === id ? { ...requirement, ...change } : requirement,
       ),
     });
+  }
+  function addAssemblyInputJob(candidate: Job) {
+    const inputLevel = jobBuildLevel(candidate) as Exclude<BuildLevel, "LRU">;
+    const alreadyConfigured = (job.assemblyRequirements ?? []).some(
+      (requirement) =>
+        requirement.inputLevel === inputLevel &&
+        requirement.pn.trim().toLowerCase() === candidate.pn.trim().toLowerCase() &&
+        requirement.rev.trim().toLowerCase() === candidate.rev.trim().toLowerCase(),
+    );
+    onUpdate({
+      linkedJobIds: Array.from(
+        new Set([...(job.linkedJobIds ?? []), candidate.id]),
+      ),
+      assemblyRequirements: alreadyConfigured
+        ? job.assemblyRequirements ?? []
+        : [
+            ...(job.assemblyRequirements ?? []),
+            {
+              id: makeId("job-requirement"),
+              inputLevel,
+              ksid: candidate.ksid,
+              pnName: candidate.pnName,
+              pn: candidate.pn,
+              rev: candidate.rev,
+              quantityPerAssembly: 1,
+            },
+          ],
+    });
+    notify(
+      `${inputLevel} Job #${candidate.jobNumber} added to this ${buildLevel} assembly.`,
+    );
   }
   function updateMechanicalShipment(id: string, change: Partial<MechanicalShipment>) {
     const mechanicalShipments = (job.mechanicalShipments ?? []).map((batch) =>
@@ -12345,6 +12416,44 @@ function JobDrawer({
                 <small>Customer Due Date</small>
                 <strong>{dateLabel(job.customerDueDate)}</strong>
               </div>
+            </section>
+          )}
+          {editingDetails && buildLevel !== "PCBA" && (
+            <section className="existing-job-link-editor">
+              <div>
+                <strong>
+                  Add missed {buildLevel === "CCA" ? "PCBA" : "CCA / PCBA"} jobs
+                </strong>
+                <small>
+                  Only unlinked jobs in this same Customer Sub-Category / Folder
+                  and Business Section are shown.
+                </small>
+              </div>
+              {additionalAssemblyInputJobs.length ? (
+                <div className="existing-job-link-list">
+                  {additionalAssemblyInputJobs.map((candidate) => (
+                    <div key={candidate.id}>
+                      <span>
+                        <strong>
+                          {jobBuildLevel(candidate)} Job #{candidate.jobNumber}
+                        </strong>
+                        <small>
+                          {candidate.ksid || "No KSID"} · {candidate.pnName || candidate.pn}
+                        </small>
+                      </span>
+                      <button
+                        type="button"
+                        className="button secondary small"
+                        onClick={() => addAssemblyInputJob(candidate)}
+                      >
+                        <Plus size={14} /> Add job
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <em>Every eligible job in this customer folder is already linked.</em>
+              )}
             </section>
           )}
           {(buildLevel !== "PCBA" || familyJobs.length > 1) && <section className="drawer-section assembly-structure-section">
