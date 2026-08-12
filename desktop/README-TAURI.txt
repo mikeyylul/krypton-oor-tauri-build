@@ -22,13 +22,13 @@ RFQ FOLDER CREATION
 - Each new RFQ folder contains Customer Data and Customer Request subfolders.
 - The new folder opens automatically in Windows Explorer.
 
-VERSION 68 WORKFLOWS
+VERSION 69 WORKFLOWS
 - Manufacturing customer groups can be organized in collapsible folders without deleting their jobs.
 - Mechanical Config presets support KSID-based LRU, CCA, and PCBA job families.
 - Preset-generated jobs remain individually editable before creation.
 - Action Items support recurring Weekly or 3-Day classifications and one-time deferrals.
 - Follow-Up Later sections are collapsible, and Return to Main List clears the selected deferral or recurring classification.
-- Job Excel Format creates a copy-and-paste table from selected jobs in the current customer folder.
+- Job Excel Format creates a copy-and-paste table, including QTY, from selected jobs in the current customer folder.
 - Meeting Notes provides a separate daily note view organized by customer and date.
 - Meeting Notes are saved locally and included in Complete Backup/Restore.
 - Shortage comments remain manually editable, support OBSOLETE row handling, and compare only against Customer Due Date or the New Project Calculated Due Date.

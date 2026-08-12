@@ -94,6 +94,7 @@ for (const fragment of [
   "3-Day Follow-Up",
   "Job Excel Format",
   "selectedJobExcelIds",
+  "QTY: job.quantity",
   "meetingNotesStorageKey",
   "Meeting Notes",
   "meetingNotesHydrated",
@@ -124,7 +125,7 @@ for (const fragment of [
   "job.shortages.filter((item) => !item.complete).map((item) => ({",
 ]) {
   if (!desktopSource.includes(fragment)) {
-    throw new Error(`Missing Version 68 workflow behavior: ${fragment}`);
+    throw new Error(`Missing Version 69 workflow behavior: ${fragment}`);
   }
 }
 
@@ -139,5 +140,5 @@ if ((desktopSource.match(/<details className="excel-paste-disclosure">/g) ?? [])
 }
 
 console.log(
-  "Validated Website Version 68 parity, received-shortage filtering in customer copies, LRU CCA/PCBA selection, editable existing assembly links, customer-folder propagation, Windows organization-folder drag-and-drop, native RFQ folder creation, local autosave identity, packaged photo OCR, and Tauri offline restrictions.",
+  "Validated Website Version 69 parity, Job Excel Format QTY output, received-shortage filtering in customer copies, LRU CCA/PCBA selection, editable existing assembly links, customer-folder propagation, Windows organization-folder drag-and-drop, native RFQ folder creation, local autosave identity, packaged photo OCR, and Tauri offline restrictions.",
 );
