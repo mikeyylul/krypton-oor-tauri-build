@@ -5637,7 +5637,7 @@ function ShortageEditor({
   const requiresCustomerAction = (item: ShortageItem) =>
     shortagePastProjectDueDate(item, job.customerDueDate, job.dueDate);
   async function copyCustomerTable() {
-    const rows = job.shortages.map((item) => ({
+    const rows = job.shortages.filter((item) => !item.complete).map((item) => ({
       pn: item.pnNumber,
       qty: item.quantity,
       due: item.customerSupplied ? "CUSTOMER SUPPLIED" : dateLabel(item.dueDate),

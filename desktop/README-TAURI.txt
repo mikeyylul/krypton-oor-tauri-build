@@ -22,7 +22,7 @@ RFQ FOLDER CREATION
 - Each new RFQ folder contains Customer Data and Customer Request subfolders.
 - The new folder opens automatically in Windows Explorer.
 
-VERSION 65 WORKFLOWS
+VERSION 68 WORKFLOWS
 - Manufacturing customer groups can be organized in collapsible folders without deleting their jobs.
 - Mechanical Config presets support KSID-based LRU, CCA, and PCBA job families.
 - Preset-generated jobs remain individually editable before creation.
@@ -37,6 +37,7 @@ VERSION 65 WORKFLOWS
 - Customer folders can exclude selected jobs from Action Items and Follow-Up Lists with No Follow Ups controls.
 - Initial Krypton Dock Date uses the New Project Calculated Due Date, then Customer Due Date, while retaining longest PCB/shortage-date and Accepted Partials overrides.
 - Customer sub-category folders can be dragged into organization folders in the Windows application.
+- Customer-facing shortage copies exclude items already marked Received while the internal list keeps them visible.
 
 PHOTO SCANNING
 - OCR worker, engine, and English recognition data are included inside the application.
