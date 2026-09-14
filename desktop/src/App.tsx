@@ -3052,6 +3052,7 @@ export default function Home() {
   );
 }
 
+
 const shortageReportColumns = [
   "Customer Name",
   "Job #",
@@ -3137,7 +3138,8 @@ function downloadShortageListReport(jobs: Job[]) {
     .filter((job) =>
       !job.noShortageList
       && job.shortages.length === 0
-      && !!job.createdDate
+      && /^\d{4}-\d{2}-\d{2}$/.test(job.createdDate)
+      && !Number.isNaN(new Date(`${job.createdDate}T12:00:00Z`).getTime())
       && addBusinessDays(job.createdDate, 2) <= weekEnd,
     )
     .sort((a, b) => a.createdDate.localeCompare(b.createdDate));
