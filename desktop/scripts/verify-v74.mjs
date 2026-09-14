@@ -96,10 +96,14 @@ try {
   console.log("100 keystrokes: one autosave, one deferred action recalculation, zero assembly graph recalculations.");
   await page.getByLabel("Customer supplied PART-dated", { exact: true }).check();
   assert.equal(await page.getByLabel("Shortage due date", { exact: true }).first().inputValue(), day(2));
+  await page.evaluate(() => { window.__copiedHtml = undefined; });
   await page.getByRole("button", { name: "Copy Customer Table", exact: true }).click();
+  await page.waitForFunction(() => typeof window.__copiedHtml === "string");
   assert.match(await page.evaluate(() => window.__copiedHtml), new RegExp(day(2).slice(0, 4)));
   await page.getByLabel("Shortage due date", { exact: true }).first().fill("");
+  await page.evaluate(() => { window.__copiedHtml = undefined; });
   await page.getByRole("button", { name: "Copy Customer Table", exact: true }).click();
+  await page.waitForFunction(() => typeof window.__copiedHtml === "string");
   assert.match(await page.evaluate(() => window.__copiedHtml), /Not Set/);
   await page.getByLabel("Status filter value", { exact: true }).selectOption("SMT");
   await page.evaluate(() => window.dispatchEvent(new Event("blur")));
