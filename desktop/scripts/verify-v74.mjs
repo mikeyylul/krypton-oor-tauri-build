@@ -142,7 +142,7 @@ try {
   const archive = XLSX.CFB.read(fs.readFileSync(file), { type: "buffer" });
   const styles = archive.FileIndex[archive.FullPaths.findIndex((path) => path.endsWith("/xl/styles.xml"))];
   assert(Buffer.from(styles.content).toString().includes('wrapText="1"'));
-  await page.getByRole("button", { name: "List of Action Items", exact: true }).click();
+  await page.getByRole("button", { name: /List of Action Items/ }).click();
   const head = page.locator(".grouped-action-head").first();
   assert.equal(await head.locator("span").nth(3).innerText(), "PN Name");
   assert.equal(await head.locator("span").nth(4).innerText(), "PN");
