@@ -105,10 +105,10 @@ try {
   await page.getByRole("button", { name: "Copy Customer Table", exact: true }).click();
   await page.waitForFunction(() => typeof window.__copiedHtml === "string");
   assert.match(await page.evaluate(() => window.__copiedHtml), /Not Set/);
-  await page.getByLabel("Status filter value", { exact: true }).selectOption("SMT");
+  await page.locator("label.drawer-field").filter({ hasText: "Status filter value" }).locator("select").selectOption("SMT");
   await page.evaluate(() => window.dispatchEvent(new Event("blur")));
   assert((await page.evaluate(() => JSON.parse(localStorage.getItem("projectflow-manufacturing-v3"))[0].workflowCompleted)).includes("kitting"));
-  await page.getByLabel("Status filter value", { exact: true }).selectOption("TH ASSY");
+  await page.locator("label.drawer-field").filter({ hasText: "Status filter value" }).locator("select").selectOption("TH ASSY");
   await page.evaluate(() => window.dispatchEvent(new Event("blur")));
   assert((await page.evaluate(() => JSON.parse(localStorage.getItem("projectflow-manufacturing-v3"))[0].workflowCompleted)).includes("smt"));
   await comment.fill("Flushed on focus loss");
