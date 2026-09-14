@@ -144,7 +144,7 @@ try {
   assert(Buffer.from(styles.content).toString().includes('wrapText="1"'));
   await page.getByRole("button", { name: /List of Action Items/ }).click();
   const head = page.locator(".grouped-action-head").first();
-  assert.equal(await head.locator("span").nth(3).innerText(), "PN Name");
+  assert.equal(await head.locator("span").nth(3).textContent(), "PN Name");
   assert.equal(await head.locator("span").nth(4).innerText(), "PN");
   assert.deepEqual(errors, []);
   console.log("PASS: 80 folder memberships survive reload; customer dates/copy; dock drivers; workflow completion; blur flush; four-sheet Excel filtering and wrap alignment; PN columns; quote removal.");
