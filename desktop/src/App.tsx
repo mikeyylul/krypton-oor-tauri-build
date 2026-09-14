@@ -2923,6 +2923,7 @@ export default function Home() {
             metrics={metrics}
             onOpen={openJobTab}
             onView={setActiveView}
+            onShortageReport={() => downloadShortageListReport(jobs)}
           />
         )}
         {(activeView === "commercial" || activeView === "aerospace") && (
@@ -3051,11 +3052,118 @@ export default function Home() {
   );
 }
 
+
+const shortageReportColumns = [
+  "Customer Name",
+  "Job #",
+  "KSID",
+  "PN Name",
+  "PN and Rev",
+  "Issue KSP#",
+];
+
+function downloadShortageListReport(jobs: Job[]) {
+  const today = chicagoDateKey();
+  const date = new Date(`${today}T12:00:00Z`);
+  const day = date.getUTCDay();
+  date.setUTCDate(date.getUTCDate() + (day === 0 ? 0 : 7 - day));
+  const weekEnd = dateKey(date);
+  const openJobs = jobs.filter((job) => job.status !== "Complete");
+  const workbook = XLSX.utils.book_new();
+
+  function makeRow(job: Job, shortages: ShortageItem[], note = "") {
+    return [
+      job.customer,
+      job.jobNumber,
+      job.ksid,
+      job.pnName,
+      [job.pn, job.rev ? `Rev ${job.rev}` : ""].filter(Boolean).join(" "),
+      shortages.length
+        ? shortages.map((item) =>
+            `• ${item.kspNumber || "KSP# pending"} | ${item.pnNumber || "PN# pending"} | ${item.dueDate || "No due date"}`,
+          ).join("\n")
+        : note,
+    ];
+  }
+
+  function appendSheet(name: string, entries: [Job, ShortageItem[]][]) {
+    const rows = [
+      shortageReportColumns,
+      ...entries.map(([job, shortages]) => makeRow(job, shortages)),
+    ];
+    const sheet = XLSX.utils.aoa_to_sheet(rows);
+    sheet["!cols"] = [
+      { wch: 26 }, { wch: 17 }, { wch: 17 },
+      { wch: 30 }, { wch: 30 }, { wch: 75 },
+    ];
+    // Keep multiple KSPs on one job row in a multiline Excel cell.
+    for (let row = 1; row < rows.length; row += 1) {
+      const cell = sheet[XLSX.utils.encode_cell({ r: row, c: 5 })];
+      if (cell) cell.s = { alignment: { wrapText: true, vertical: "top" } };
+      sheet["!rows"] ??= [];
+      sheet["!rows"][row] = { hpt: Math.max(25, entries[row - 1][1].length * 18) };
+    }
+    XLSX.utils.book_append_sheet(workbook, sheet, name);
+  }
+
+  for (const division of ["Commercial", "Aerospace"] as const) {
+    const entries: [Job, ShortageItem[]][] = [];
+    for (const job of openJobs.filter((item) => item.division === division)) {
+      const pending = job.shortages.filter((item) => !item.complete && !item.customerSupplied);
+      const inWindow = pending.filter((item) => !item.dueDate || item.dueDate <= weekEnd);
+      if (inWindow.length) {
+        inWindow.sort((a, b) =>
+          (a.dueDate || "9999-12-31").localeCompare(b.dueDate || "9999-12-31"),
+        );
+        entries.push([job, inWindow]);
+      }
+    }
+    entries.sort((a, b) =>
+      (a[1][0].dueDate || "9999-12-31").localeCompare(b[1][0].dueDate || "9999-12-31")
+      || a[0].customer.localeCompare(b[0].customer)
+      || a[0].jobNumber.localeCompare(b[0].jobNumber, undefined, { numeric: true }),
+    );
+    appendSheet(division, entries);
+  }
+
+  const supplied: [Job, ShortageItem[]][] = openJobs
+    .map((job): [Job, ShortageItem[]] => [
+      job, job.shortages.filter((item) => !item.complete && item.customerSupplied),
+    ])
+    .filter(([, items]) => items.length > 0)
+    .sort((a, b) => a[0].customer.localeCompare(b[0].customer));
+  appendSheet("Customer Supplied", supplied);
+
+  const needsReport = openJobs
+    .filter((job) =>
+      !job.noShortageList
+      && job.shortages.length === 0
+      && /^\d{4}-\d{2}-\d{2}$/.test(job.createdDate)
+      && !Number.isNaN(new Date(`${job.createdDate}T12:00:00Z`).getTime())
+      && addBusinessDays(job.createdDate, 2) <= weekEnd,
+    )
+    .sort((a, b) => a.createdDate.localeCompare(b.createdDate));
+  const needsRows = [
+    shortageReportColumns,
+    ...needsReport.map((job) => makeRow(
+      job, [], `Needs Shortage List Waived or Completed | 2-day target: ${addBusinessDays(job.createdDate, 2)}`,
+    )),
+  ];
+  const needsSheet = XLSX.utils.aoa_to_sheet(needsRows);
+  needsSheet["!cols"] = [
+    { wch: 26 }, { wch: 17 }, { wch: 17 },
+    { wch: 30 }, { wch: 30 }, { wch: 75 },
+  ];
+  XLSX.utils.book_append_sheet(workbook, needsSheet, "Need Shortage Report");
+  XLSX.writeFile(workbook, `Krypton-OOR-Shortage-List-Report-${today}.xlsx`);
+}
+
 function Overview({
   jobs,
   metrics,
   onOpen,
   onView,
+  onShortageReport,
 }: {
   jobs: Job[];
   metrics: {
@@ -3066,6 +3174,7 @@ function Overview({
   };
   onOpen: (id: string) => void;
   onView: (view: View) => void;
+  onShortageReport: () => void;
 }) {
   const cards = [
     {
@@ -3107,6 +3216,11 @@ function Overview({
             </article>
           );
         })}
+      </div>
+      <div className="panel" style={{ padding: 16 }}>
+        <button className="button primary" type="button" onClick={onShortageReport}>
+          <Download size={17} /> Shortage List Report
+        </button>
       </div>
       <div className="manufacturing-overview">
         <section className="panel job-register">
