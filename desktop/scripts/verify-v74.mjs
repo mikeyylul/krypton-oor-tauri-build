@@ -2,7 +2,7 @@ import fs from "node:fs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { chromium } from "@playwright/test";
-import * as XLSX from "xlsx";
+import XLSX from "xlsx";
 
 const source = fs.readFileSync("../app/page.tsx", "utf8");
 const sample = source.match(/const starterJobs: Job\[\] = (\[[\s\S]*?\n\]);/);
