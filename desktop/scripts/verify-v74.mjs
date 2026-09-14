@@ -32,6 +32,9 @@ jobs[1].shortages = [shortage("old", day(-2)), shortage("future", day(20)), shor
 jobs[2].shortages = [shortage("customer", day(-1), true), shortage("customer-future", day(20), true)];
 jobs[3].noShortageList = true;
 jobs[4].status = "Complete";
+jobs[6].shortages = [shortage("today", day(0)), shortage("another", day(-1)), shortage("mixed-undated", "")];
+jobs[7].shortages = [shortage("only-undated", "")];
+jobs[8].workflowCompleted = ["shortage-list"];
 const folder = { id: "test-folder", name: "Large organization", division: "Commercial",
   collapsed: false, customers: jobs.map((job) => job.customer.trim()) };
 const dockSource = source.slice(source.indexOf("function materialsReadyDate("), source.indexOf("function pcbaReadyForKitting(")).replace("job: Job", "job");
@@ -39,7 +42,7 @@ const dock = Function("latestDate", dockSource + "; return materialsReadyDate;")
 assert.equal(dock(jobs[0]), day(2), "Undated items do not block dock date");
 assert.equal(dock({ ...jobs[0], pcbDockDate: day(10) }), day(10), "PCB longest lead");
 assert.equal(dock({ ...jobs[0], pcbDockDate: "", shortages: [shortage("a", day(5)), shortage("b", "")] }), day(5));
-const server = spawn(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "dev"], { shell: true, stdio: "pipe" });
+const server = spawn(process.platform === "win32" ? "npm.cmd" : "npm", ["exec", "--", "vite", "preview", "--host", "127.0.0.1", "--port", "1420"], { shell: true, stdio: "pipe" });
 server.stdout.on("data", () => {}); server.stderr.on("data", () => {});
 let browser;
 try {
@@ -124,7 +127,14 @@ try {
   assert(report.includes("KSP-old")); assert(report.includes("KSP-customer"));
   assert(!report.includes("KSP-future")); assert(!report.includes("KSP-received")); assert(!report.includes("KSP-customer-future"));
   const need = JSON.stringify(workbook.Sheets["Need Shortage Report"]);
-  assert(need.includes("91005")); assert(!need.includes("91003")); assert(!need.includes("91004"));
+  assert(need.includes("91005")); assert(!need.includes("91003")); assert(!need.includes("91004")); assert(!need.includes("91008"));
+  const commercialRows = XLSX.utils.sheet_to_json(workbook.Sheets.Commercial, { header: 1 }).slice(1);
+  const grouped = commercialRows.filter((row) => row[1] === "91006");
+  assert.equal(grouped.length, 1, "One row per job");
+  assert.match(grouped[0][5], /KSP-today/);
+  assert.match(grouped[0][5], /KSP-another/);
+  assert(grouped[0][5].endsWith("Not Set"), "Undated bullet last");
+  assert.equal(commercialRows.at(-1)[1], "91007", "Undated-only job sorted last");
   const archive = XLSX.CFB.read(fs.readFileSync(file), { type: "buffer" });
   const styles = archive.FileIndex[archive.FullPaths.findIndex((path) => path.endsWith("/xl/styles.xml"))];
   assert(Buffer.from(styles.content).toString().includes('wrapText="1"'));

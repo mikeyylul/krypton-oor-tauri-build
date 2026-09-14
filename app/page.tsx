@@ -1086,7 +1086,7 @@ function actionItemsForJobs(jobs: Job[]): ActionItem[] {
       }
       if (!job.noShortageList) {
         const openShortages = job.shortages.filter((item) => !item.complete);
-        if (!job.shortages.length) {
+        if (!job.shortages.length && !job.workflowCompleted.includes("shortage-list")) {
           addIfSoon(
             "shortage-list",
             "Complete or waive Shortage List",
@@ -3145,6 +3145,7 @@ function downloadShortageListReport(jobs: Job[]) {
     .filter((job) =>
       !job.noShortageList
       && job.shortages.length === 0
+      && !job.workflowCompleted.includes("shortage-list")
       && /^\d{4}-\d{2}-\d{2}$/.test(job.createdDate)
       && !Number.isNaN(new Date(`${job.createdDate}T12:00:00Z`).getTime())
       && addBusinessDays(job.createdDate, 2) <= weekEnd,
@@ -10791,7 +10792,7 @@ function JobDrawer({
         (job.shortages.length > 0 &&
           job.shortages.every((item) => item.complete))
           ? `Completed${job.allPartsReceivedDate ? ` ${dateLabel(job.allPartsReceivedDate)}` : ""}`
-          : "3 business days from project creation",
+          : "2 business days from project creation",
       done:
         job.workflowCompleted.includes("shortage-list") ||
         job.noShortageList ||
