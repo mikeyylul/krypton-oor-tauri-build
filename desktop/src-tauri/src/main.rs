@@ -170,14 +170,20 @@ fn create_rfq_folder(
     Ok(main_folder.to_string_lossy().into_owned())
 }
 
+#[tauri::command]
+fn finish_close(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.destroy().map_err(|error| error.to_string())
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             select_rfq_customer_folder,
-            create_rfq_folder
+            create_rfq_folder,
+            finish_close
         ])
         .setup(|app| {
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+            let main_window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Krypton Solutions OOR")
                 .inner_size(1440.0, 900.0)
                 .min_inner_size(1100.0, 700.0)
@@ -192,6 +198,13 @@ fn main() {
                 })
                 .on_new_window(|_, _| NewWindowResponse::Deny)
                 .build()?;
+            let closing_window = main_window.clone();
+            main_window.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = closing_window.eval("window.dispatchEvent(new Event('krypton-before-close'))");
+                }
+            });
             Ok(())
         })
         .run(tauri::generate_context!())

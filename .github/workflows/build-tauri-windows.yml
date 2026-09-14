@@ -45,6 +45,13 @@ jobs:
           npm run build:ui
           npm run validate
 
+      - name: Verify Version 74 browser behavior
+        working-directory: desktop
+        run: |
+          npm install --no-save --package-lock=false @playwright/test
+          npx playwright install chromium
+          node scripts/verify-v74.mjs
+
       - name: Prepare Windows application icon
         shell: pwsh
         run: |
@@ -58,19 +65,19 @@ jobs:
       - name: Create clean downloadable package
         shell: pwsh
         run: |
-          $package = "release/Krypton-OOR-Tauri-v69-Windows11-x64"
+          $package = "release/Krypton-OOR-Tauri-v74.1-Windows11-x64"
           New-Item -ItemType Directory -Force "$package/Portable" | Out-Null
           New-Item -ItemType Directory -Force "$package/Installer" | Out-Null
           Copy-Item "desktop/src-tauri/target/x86_64-pc-windows-msvc/release/KryptonOOR.exe" "$package/Portable/KryptonOOR.exe"
           Copy-Item "desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe" "$package/Installer/"
           Copy-Item "desktop/README-TAURI.txt" "$package/README-FIRST.txt"
           Get-FileHash "$package/Portable/KryptonOOR.exe" -Algorithm SHA256 | Format-List | Out-File "$package/SHA256.txt"
-          Compress-Archive -Path "$package/*" -DestinationPath "release/Krypton-OOR-Tauri-v69-Windows11-x64.zip" -CompressionLevel Optimal
+          Compress-Archive -Path "$package/*" -DestinationPath "release/Krypton-OOR-Tauri-v74.1-Windows11-x64.zip" -CompressionLevel Optimal
 
       - name: Upload verified Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: Krypton-OOR-Tauri-v69-Windows11-x64
-          path: release/Krypton-OOR-Tauri-v69-Windows11-x64.zip
+          name: Krypton-OOR-Tauri-v74.1-Windows11-x64
+          path: release/Krypton-OOR-Tauri-v74.1-Windows11-x64.zip
           if-no-files-found: error
           retention-days: 30

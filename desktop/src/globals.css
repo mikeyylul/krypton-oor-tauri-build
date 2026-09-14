@@ -8104,3 +8104,11 @@ button:disabled {
     width: 100%;
   }
 }
+
+/* Version 72: separate identity columns on grouped Action Items. */
+.grouped-action-head, .grouped-action-row > summary {
+  grid-template-columns: minmax(130px,1fr) 100px 100px minmax(150px,1.3fr) minmax(140px,1.2fr) minmax(140px,1fr) 120px 170px 36px;
+  min-width: 1220px;
+}
+.operational-table { overflow-x: auto; }
+.follow-up-job-summary small { display: block; }
