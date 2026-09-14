@@ -142,3 +142,10 @@ if ((desktopSource.match(/<details className="excel-paste-disclosure">/g) ?? [])
 console.log(
   "Validated Website Version 69 parity, Job Excel Format QTY output, received-shortage filtering in customer copies, LRU CCA/PCBA selection, editable existing assembly links, customer-folder propagation, Windows organization-folder drag-and-drop, native RFQ folder creation, local autosave identity, packaged photo OCR, and Tauri offline restrictions.",
 );
+
+for (const fragment of ["Shortage List Report", "BufferedInput", "BufferedTextarea", "flushDeferredEdits", "applyStatusWorkflow", "actualCustomer"]) {
+  if (!desktopSource.includes(fragment)) throw new Error("Missing Version 74 behavior: " + fragment);
+}
+if (desktopSource.includes('id: "quotes"') || desktopSource.includes("function QuotesView(")) throw new Error("Retired quote UI remains");
+if (!rustSource.includes("fn finish_close") || !rustSource.includes("krypton-before-close")) throw new Error("Native close must flush edits");
+console.log("Validated Version 74 source parity and close-flush integration.");

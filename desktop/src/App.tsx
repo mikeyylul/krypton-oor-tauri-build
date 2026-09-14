@@ -33,6 +33,8 @@ import {
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import {
+  ComponentProps,
+  useId,
   ChangeEvent,
   DragEvent,
   FormEvent,
@@ -41,6 +43,110 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
+
+
+const pendingTextEdits = new Map<string, () => void>();
+const pendingSaves = new Map<string, () => void>();
+let textTimer: ReturnType<typeof setTimeout> | undefined;
+let saveTimer: ReturnType<typeof setTimeout> | undefined;
+
+function flushDeferredEdits() {
+  clearTimeout(textTimer);
+  clearTimeout(saveTimer);
+  const edits = [...pendingTextEdits.values()];
+  pendingTextEdits.clear();
+  if (edits.length) flushSync(() => edits.forEach((edit) => edit()));
+  // flushSync also commits the persistence effects before writing.
+  clearTimeout(saveTimer);
+  for (const [key, save] of pendingSaves) {
+    try { save(); pendingSaves.delete(key); }
+    catch { window.dispatchEvent(new Event("krypton-save-error")); }
+  }
+}
+function queueTextEdit(id: string, edit: () => void) {
+  pendingTextEdits.set(id, edit);
+  clearTimeout(textTimer);
+  textTimer = setTimeout(flushDeferredEdits, 500);
+}
+function useDeferredPersistence(key: string, value: unknown, hydrated: boolean) {
+  useEffect(() => {
+    if (!hydrated) return;
+    pendingSaves.set(key, () => window.localStorage.setItem(key, JSON.stringify(value)));
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(flushDeferredEdits, 500);
+  }, [key, value, hydrated]);
+}
+function BufferedInput(props: ComponentProps<"input">) {
+  const id = useId();
+  const latest = useRef(props);
+  latest.current = props;
+  const [draft, setDraft] = useState(props.value);
+  useEffect(() => {
+    if (!pendingTextEdits.has(id)) setDraft(props.value);
+  }, [props.value, id]);
+  const buffered = props.value !== undefined && !props.readOnly && Boolean(props.onChange)
+    && !["checkbox", "radio", "file", "date", "time", "datetime-local", "number",
+      "range", "color", "button", "submit", "hidden"].includes(props.type ?? "text");
+  if (!buffered) return <input {...props} />;
+  return <input {...props} value={draft ?? ""} onChange={(event) => {
+    const captured = { ...event, target: event.target, currentTarget: event.currentTarget };
+    setDraft(event.target.value);
+    queueTextEdit(id, () => latest.current.onChange?.(captured));
+  }} onBlur={(event) => {
+    flushDeferredEdits();
+    latest.current.onBlur?.(event);
+  }} />;
+}
+function BufferedTextarea(props: ComponentProps<"textarea">) {
+  const id = useId();
+  const latest = useRef(props);
+  latest.current = props;
+  const [draft, setDraft] = useState(props.value);
+  useEffect(() => {
+    if (!pendingTextEdits.has(id)) setDraft(props.value);
+  }, [props.value, id]);
+  if (props.value === undefined || props.readOnly || !props.onChange) return <textarea {...props} />;
+  return <textarea {...props} value={draft ?? ""} onChange={(event) => {
+    const captured = { ...event, target: event.target, currentTarget: event.currentTarget };
+    setDraft(event.target.value);
+    queueTextEdit(id, () => latest.current.onChange?.(captured));
+  }} onBlur={(event) => {
+    flushDeferredEdits();
+    latest.current.onBlur?.(event);
+  }} />;
+}
+
+// SheetJS Community Edition ignores alignment styles on export.
+// Add wrap alignment to its generated OOXML styles using its bundled ZIP writer.
+function downloadWrappedWorkbook(workbook: XLSX.WorkBook, filename: string) {
+  const cfb = (XLSX as any).CFB;
+  const archive = cfb.read(new Uint8Array(XLSX.write(workbook, {
+    type: "array", bookType: "xlsx", compression: false,
+  })), { type: "buffer" });
+  const index = archive.FullPaths.findIndex((path: string) => path.endsWith("/xl/styles.xml"));
+  if (index < 0) throw new Error("Excel styles are missing");
+  const entry = archive.FileIndex[index];
+  let xml = new TextDecoder().decode(new Uint8Array(entry.content));
+  xml = xml.replace(/<cellXfs([^>]*)>([\s\S]*?)<\/cellXfs>/,
+    (_all, attrs, contents) => "<cellXfs" + attrs + ">" + contents.replace(
+      /<xf\b([^>]*?)\/>/g,
+      '<xf$1 applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf>',
+    ) + "</cellXfs>");
+  entry.content = new TextEncoder().encode(xml);
+  entry.size = entry.content.length;
+  const bytes = cfb.write(archive, { type: "buffer", fileType: "zip", compression: false });
+  const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+}
 
 type Division = "Commercial" | "Aerospace";
 type View =
@@ -674,28 +780,13 @@ function specialProcessTurnDays(job: Job) {
 }
 
 function materialsReadyDate(job: Job) {
-  if (!job.pcbDockDate) return "";
-  const allListedPartsReceived =
-    job.shortages.length > 0 && job.shortages.every((item) => item.complete);
-  let shortageReadyDate = "";
-  if (job.noShortageList || allListedPartsReceived) {
-    shortageReadyDate = job.allPartsReceivedDate;
-  } else {
-    const datedShortages = job.shortages.filter((item) => item.dueDate);
-    const unresolvedDatedShortages = job.shortages.filter(
-      (item) => !item.complete,
-    );
-    if (
-      datedShortages.length > 0 &&
-      unresolvedDatedShortages.every((item) => item.dueDate)
-    ) {
-      shortageReadyDate = latestDate(datedShortages.map((item) => item.dueDate));
-    } else if (!unresolvedDatedShortages.length) {
-      shortageReadyDate = job.pcbDockDate;
-    }
-  }
-  if (!shortageReadyDate) return "";
-  return latestDate([job.pcbDockDate, shortageReadyDate]);
+  return latestDate([
+    job.pcbDockDate,
+    job.noShortageList || job.shortages.every((item) => item.complete)
+      ? job.allPartsReceivedDate : "",
+    ...job.shortages.filter((item) => !item.complete && item.dueDate)
+      .map((item) => item.dueDate),
+  ].filter(Boolean));
 }
 
 function pcbaReadyForKitting(job: Job) {
@@ -735,7 +826,7 @@ function kryptonDockDate(job: Job) {
 }
 
 function kryptonDockDriver(job: Job) {
-  const datedShortages = job.shortages.filter((item) => Boolean(item.dueDate));
+  const datedShortages = job.shortages.filter((item) => !item.complete && Boolean(item.dueDate));
   const longestShortageDate = latestDate(
     datedShortages.map((item) => item.dueDate),
   );
@@ -967,6 +1058,7 @@ function dockAlertsForJobs(jobs: Job[]): DockAlert[] {
 }
 
 function actionItemsForJobs(jobs: Job[]): ActionItem[] {
+  if (typeof window !== "undefined" && (window as any).__KRYPTON_TEST__) performance.mark("krypton-action-recalculation");
   const items: ActionItem[] = [];
   jobs
     .filter((job) => job.status !== "Complete")
@@ -994,11 +1086,11 @@ function actionItemsForJobs(jobs: Job[]): ActionItem[] {
       }
       if (!job.noShortageList) {
         const openShortages = job.shortages.filter((item) => !item.complete);
-        if (!job.shortages.length) {
+        if (!job.shortages.length && !job.workflowCompleted.includes("shortage-list")) {
           addIfSoon(
             "shortage-list",
             "Complete or waive Shortage List",
-            addBusinessDays(job.createdDate, 3),
+            addBusinessDays(job.createdDate, 2),
           );
         }
         openShortages.forEach((shortage) => {
@@ -1345,7 +1437,7 @@ function normalizeCustomerOrganizationFolder(
     division: folder.division === "Aerospace" ? "Aerospace" : "Commercial",
     name: folder.name?.trim() || "Organization folder",
     customers: Array.from(
-      new Set((folder.customers ?? []).map((customer) => customer.trim()).filter(Boolean)),
+      new Set((folder.customers ?? []).filter((customer) => customer.trim())),
     ),
     collapsed: folder.collapsed ?? false,
   };
@@ -1500,10 +1592,21 @@ function automaticAssemblyStatus(job: Job, jobs: Job[]) {
   return (level === "CCA" ? "Waiting for PCBA" : "Waiting for CCAs") as JobStatus;
 }
 
+function applyStatusWorkflow(job: Job) {
+  if (jobBuildLevel(job) !== "PCBA") return job;
+  const afterSmt = ["XRAY", "TH ASSY", "Visual QC", "Testing", "Rework", "Shipping QC", "Complete"];
+  const completed = new Set(job.workflowCompleted);
+  if (job.status === "SMT" || afterSmt.includes(job.status)) completed.add("kitting");
+  if (afterSmt.includes(job.status)) completed.add("smt");
+  return completed.size === job.workflowCompleted.length ? job
+    : { ...job, workflowCompleted: [...completed] };
+}
+
 function reconcileAssemblyStatuses(jobs: Job[]) {
+  if (typeof window !== "undefined" && (window as any).__KRYPTON_TEST__) performance.mark("krypton-graph-recalculation");
   return jobs.map((job) => {
     const status = automaticAssemblyStatus(job, jobs);
-    return status === job.status ? job : { ...job, status };
+    return applyStatusWorkflow(status === job.status ? job : { ...job, status });
   });
 }
 
@@ -1693,7 +1796,6 @@ const navItems: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
   { id: "commercial", label: "Commercial", icon: Factory },
   { id: "aerospace", label: "Aerospace", icon: Gauge },
-  { id: "quotes", label: "Quotes", icon: FileText },
   { id: "actions", label: "List of Action Items", icon: AlertTriangle },
   { id: "follow-ups", label: "Follow Up List", icon: StickyNote },
   { id: "integrations", label: "Settings", icon: Settings2 },
@@ -1701,7 +1803,7 @@ const navItems: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
 
 export default function Home() {
   const [jobs, setJobs] = useState<Job[]>(starterJobs);
-  const [quotes, setQuotes] = useState<QuoteRecord[]>([]);
+  const quotes: QuoteRecord[] = useMemo(() => [], []);
   const [activeView, setActiveView] = useState<View>("overview");
   const [selectedCustomer, setSelectedCustomer] = useState<string | null>(null);
   const [expandedDivisions, setExpandedDivisions] = useState<Division[]>([
@@ -1716,7 +1818,6 @@ export default function Home() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [toast, setToast] = useState("");
   const [hydrated, setHydrated] = useState(false);
-  const [quotesHydrated, setQuotesHydrated] = useState(false);
   const [weeklyActions, setWeeklyActions] = useState<WeeklyActionsState>(() => ({
     current: currentWorkWeek(),
     archives: [],
@@ -1736,6 +1837,7 @@ export default function Home() {
   } | null>(null);
 
   useEffect(() => {
+    window.localStorage.removeItem(quotesStorageKey);
     const saved = window.localStorage.getItem(storageKey);
     let restored: Job[] | null = null;
     if (saved) {
@@ -1752,26 +1854,6 @@ export default function Home() {
       const jobId = params.get("job");
       if (jobId) setSelectedJobId(jobId);
       if (params.get("new") === "1") setShowNewJob(true);
-    });
-    return () => cancelAnimationFrame(frame);
-  }, []);
-
-  useEffect(() => {
-    let restored: QuoteRecord[] | null = null;
-    try {
-      const raw = window.localStorage.getItem(quotesStorageKey);
-      if (raw) restored = JSON.parse(raw) as QuoteRecord[];
-    } catch {
-      window.localStorage.removeItem(quotesStorageKey);
-    }
-    const frame = requestAnimationFrame(() => {
-      if (restored) setQuotes(restored.map(normalizeQuote));
-      setQuotesHydrated(true);
-      const quoteId = new URLSearchParams(window.location.search).get("quote");
-      if (quoteId) {
-        setSelectedQuoteId(quoteId);
-        setActiveView("quotes");
-      }
     });
     return () => cancelAnimationFrame(frame);
   }, []);
@@ -1855,20 +1937,6 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    function syncQuotes(event: StorageEvent) {
-      if (event.key !== quotesStorageKey || !event.newValue) return;
-      try {
-        const incoming = JSON.parse(event.newValue) as QuoteRecord[];
-        setQuotes(incoming.map(normalizeQuote));
-      } catch {
-        // Ignore an incomplete write from another quote window.
-      }
-    }
-    window.addEventListener("storage", syncQuotes);
-    return () => window.removeEventListener("storage", syncQuotes);
-  }, []);
-
-  useEffect(() => {
     function syncCustomerOrganization(event: StorageEvent) {
       if (
         event.key !== customerOrganizationStorageKey ||
@@ -1919,47 +1987,35 @@ export default function Home() {
     return () => window.removeEventListener("storage", syncMeetingNotes);
   }, []);
 
+  useDeferredPersistence(storageKey, jobs, hydrated);
+  useDeferredPersistence(weeklyActionsStorageKey, weeklyActions, weeklyActionsHydrated);
+  useDeferredPersistence(meetingNotesStorageKey, meetingNotes, meetingNotesHydrated);
+  useDeferredPersistence(assemblyRecipesStorageKey, assemblyRecipes, assemblyRecipesHydrated);
+  useDeferredPersistence(customerOrganizationStorageKey, customerOrganizationFolders, customerOrganizationHydrated);
   useEffect(() => {
-    if (hydrated) window.localStorage.setItem(storageKey, JSON.stringify(jobs));
-  }, [hydrated, jobs]);
-  useEffect(() => {
-    if (quotesHydrated) {
-      window.localStorage.setItem(quotesStorageKey, JSON.stringify(quotes));
-    }
-  }, [quotes, quotesHydrated]);
-  useEffect(() => {
-    if (weeklyActionsHydrated) {
-      window.localStorage.setItem(
-        weeklyActionsStorageKey,
-        JSON.stringify(weeklyActions),
-      );
-    }
-  }, [weeklyActions, weeklyActionsHydrated]);
-  useEffect(() => {
-    if (meetingNotesHydrated) {
-      window.localStorage.setItem(
-        meetingNotesStorageKey,
-        JSON.stringify(meetingNotes),
-      );
-    }
-  }, [meetingNotes, meetingNotesHydrated]);
-
-  useEffect(() => {
-    if (assemblyRecipesHydrated) {
-      window.localStorage.setItem(
-        assemblyRecipesStorageKey,
-        JSON.stringify(assemblyRecipes),
-      );
-    }
-  }, [assemblyRecipes, assemblyRecipesHydrated]);
-  useEffect(() => {
-    if (customerOrganizationHydrated) {
-      window.localStorage.setItem(
-        customerOrganizationStorageKey,
-        JSON.stringify(customerOrganizationFolders),
-      );
-    }
-  }, [customerOrganizationFolders, customerOrganizationHydrated]);
+    const flush = () => flushDeferredEdits();
+    const key = (event: KeyboardEvent) => { if (event.key === "Enter") flush(); };
+    const close = () => { flush(); if (!pendingSaves.size) void desktopInvoke("finish_close"); };
+    const error = () => notify("Your latest edits could not be saved. Free local storage and try again before closing.");
+    window.addEventListener("blur", flush);
+    window.addEventListener("pagehide", flush);
+    window.addEventListener("beforeunload", flush);
+    window.addEventListener("krypton-before-close", close);
+    window.addEventListener("krypton-save-error", error);
+    document.addEventListener("click", flush, true);
+    document.addEventListener("submit", flush, true);
+    document.addEventListener("keydown", key, true);
+    return () => {
+      window.removeEventListener("blur", flush);
+      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("beforeunload", flush);
+      window.removeEventListener("krypton-before-close", close);
+      window.removeEventListener("krypton-save-error", error);
+      document.removeEventListener("click", flush, true);
+      document.removeEventListener("submit", flush, true);
+      document.removeEventListener("keydown", key, true);
+    };
+  }, []);
   useEffect(() => {
     const timer = window.setInterval(() => {
       setWeeklyActions((state) => {
@@ -2179,7 +2235,7 @@ export default function Home() {
       current.map((folder) => {
         if (folder.division !== division) return folder;
         const withoutCustomer = folder.customers.filter(
-          (item) => item !== customer,
+          (item) => item.trim().toLowerCase() !== customer.trim().toLowerCase(),
         );
         return folder.id === folderId
           ? {
@@ -2212,11 +2268,19 @@ export default function Home() {
     );
   }
   function updateJob(id: string, change: Partial<Job>) {
-    setJobs((current) =>
-      reconcileAssemblyStatuses(
-        current.map((job) => (job.id === id ? { ...job, ...change } : job)),
-      ),
-    );
+    setJobs((current) => {
+      const previous = current.find((job) => job.id === id);
+      const textOnly = Object.keys(change).every((key) =>
+        ["pnName", "contact", "poNumber", "quoteNumber", "notes", "trackingInformation"].includes(key)
+        || (key === "shortages" && previous && change.shortages?.length === previous.shortages.length
+          && change.shortages.every((item, index) => {
+            const old = previous.shortages[index];
+            return item.id === old.id && item.complete === old.complete
+              && item.dueDate === old.dueDate && item.customerSupplied === old.customerSupplied;
+          })));
+      const next = current.map((job) => job.id === id ? { ...job, ...change } : job);
+      return textOnly ? next : reconcileAssemblyStatuses(next);
+    });
   }
   function deferJobActions(id: string, mode: FollowUpCadence) {
     const until = followUpDate(mode);
@@ -2304,21 +2368,6 @@ export default function Home() {
     );
   }
 
-  function createQuote(quote: QuoteRecord) {
-    setQuotes((current) => [quote, ...current]);
-    setShowNewRfq(false);
-    setActiveView("quotes");
-    notify(`RFQ for ${quote.pn} created in ${quote.customer}.`);
-  }
-
-  function updateQuote(id: string, change: Partial<QuoteRecord>) {
-    setQuotes((current) =>
-      current.map((quote) =>
-        quote.id === id ? { ...quote, ...change } : quote,
-      ),
-    );
-  }
-
   async function createRfqFolder(division: Division) {
     const bridge = (window as DesktopBridgeWindow).__TAURI_INTERNALS__;
     if (!bridge?.invoke) {
@@ -2386,18 +2435,6 @@ export default function Home() {
       null,
       "",
       `${window.location.pathname}?job=${encodeURIComponent(id)}`,
-    );
-  }
-
-  function openQuoteWindow(id: string) {
-    setShowNewJob(false);
-    setSelectedJobId(null);
-    setSelectedQuoteId(id);
-    setActiveView("quotes");
-    window.history.replaceState(
-      null,
-      "",
-      `${window.location.pathname}?quote=${encodeURIComponent(id)}`,
     );
   }
 
@@ -2488,11 +2525,6 @@ export default function Home() {
         "Record ID": job.id,
         Payload: JSON.stringify(job),
       })),
-      ...quotes.map((quote) => ({
-        "Record Type": "Quote",
-        "Record ID": quote.id,
-        Payload: JSON.stringify(quote),
-      })),
       ...assemblyRecipes.map((recipe) => ({
         "Record Type": "Assembly Recipe",
         "Record ID": recipe.id,
@@ -2522,7 +2554,6 @@ export default function Home() {
       ["Krypton Solutions OOR Complete Backup"],
       ["Exported", new Date().toLocaleString()],
       ["Jobs", jobs.length],
-      ["Quotes", quotes.length],
       ["Assembly Configurations", assemblyRecipes.length],
       ["Customer Organization Folders", customerOrganizationFolders.length],
       ["Weekly Action Archives", weeklyActions.archives.length],
@@ -2565,9 +2596,6 @@ export default function Home() {
       const importedJobs = parsed
         .filter((row) => row.type === "Job")
         .map((row) => normalizeJob(JSON.parse(row.payload) as Job));
-      const importedQuotes = parsed
-        .filter((row) => row.type === "Quote")
-        .map((row) => normalizeQuote(JSON.parse(row.payload) as QuoteRecord));
       const importedRecipes = parsed
         .filter((row) => row.type === "Assembly Recipe")
         .map((row) =>
@@ -2589,14 +2617,13 @@ export default function Home() {
         ? normalizeMeetingNotes(JSON.parse(meetingNotesRow.payload))
         : [];
       const approved = window.confirm(
-        `Import ${importedJobs.length} jobs, ${importedQuotes.length} quotes, ${importedRecipes.length} assembly configurations, ${importedOrganizationFolders.length} organization folders, and ${importedMeetingNotes.length} meeting notes from ${file.name}?\n\nThis will replace the jobs, quotes, configurations, organization folders, Weekly Actions, and Meeting Notes currently stored on this computer.`,
+        `Import ${importedJobs.length} jobs, ${importedRecipes.length} assembly configurations, ${importedOrganizationFolders.length} organization folders, and ${importedMeetingNotes.length} meeting notes from ${file.name}?\n\nThis will replace the jobs, configurations, organization folders, Weekly Actions, and Meeting Notes currently stored on this computer.`,
       );
       if (!approved) {
         notify("Backup import canceled. No data was changed.");
         return;
       }
       setJobs(reconcileAssemblyStatuses(importedJobs));
-      setQuotes(importedQuotes);
       setAssemblyRecipes(importedRecipes);
       setCustomerOrganizationFolders(importedOrganizationFolders);
       setWeeklyActions(importedWeekly);
@@ -2605,7 +2632,7 @@ export default function Home() {
       setSelectedQuoteId(null);
       setShowNewJob(false);
       notify(
-        `Backup restored: ${importedJobs.length} jobs, ${importedQuotes.length} quotes, ${importedRecipes.length} assembly configurations, ${importedOrganizationFolders.length} organization folders, and ${importedMeetingNotes.length} meeting notes.`,
+        `Backup restored: ${importedJobs.length} jobs, ${importedRecipes.length} assembly configurations, ${importedOrganizationFolders.length} organization folders, and ${importedMeetingNotes.length} meeting notes.`,
       );
     } catch {
       notify("This file is not a valid Krypton Solutions OOR complete backup.");
@@ -2653,9 +2680,13 @@ export default function Home() {
               const availableCustomers = new Set(
                 customersByDivision[division],
               );
+              const actualCustomer = (name: string) =>
+                customersByDivision[division].find((customer) => customer === name)
+                ?? customersByDivision[division].find((customer) =>
+                  customer.trim().toLowerCase() === name.trim().toLowerCase()) ?? name;
               const assignedCustomers = new Set(
                 organizationFolders.flatMap((folder) =>
-                  folder.customers.filter((customer) =>
+                  folder.customers.map(actualCustomer).filter((customer) =>
                     availableCustomers.has(customer),
                   ),
                 ),
@@ -2737,7 +2768,7 @@ export default function Home() {
                         <span>New organization folder</span>
                       </button>
                       {organizationFolders.map((folder) => {
-                        const folderCustomers = folder.customers.filter(
+                        const folderCustomers = folder.customers.map(actualCustomer).filter(
                           (customer) => availableCustomers.has(customer),
                         );
                         return (
@@ -2750,6 +2781,7 @@ export default function Home() {
                             }}
                             onDrop={(event) => {
                               event.preventDefault();
+                              event.stopPropagation();
                               const dragged = customerFromDrop(event);
                               if (dragged?.division === division) {
                                 moveCustomerToOrganizationFolder(
@@ -2812,6 +2844,7 @@ export default function Home() {
                           onDragOver={(event) => event.preventDefault()}
                           onDrop={(event) => {
                             event.preventDefault();
+                              event.stopPropagation();
                             const dragged = customerFromDrop(event);
                             if (dragged?.division === division) {
                               moveCustomerToOrganizationFolder(
@@ -2894,7 +2927,7 @@ export default function Home() {
           <div>
             <p className="eyebrow">Krypton Solutions OOR</p>
             <h1>{title}</h1>
-            <p className="date-line">{dateLabel(chicagoDateKey())}</p>
+            <p className="date-line">Version 74.1 · {dateLabel(chicagoDateKey())}</p>
           </div>
           <div className="topbar-actions">
             {(activeView === "commercial" || activeView === "aerospace") && (
@@ -2937,15 +2970,6 @@ export default function Home() {
             onNew={openNewProjectTab}
             onUpdateJob={updateJob}
             notify={notify}
-          />
-        )}
-        {activeView === "quotes" && (
-          <QuotesView
-            quotes={quotes}
-            onNew={() => setShowNewRfq(true)}
-            onOpen={openQuoteWindow}
-            onComplete={(id, completed) => updateQuote(id, { completed })}
-            onCreateFolder={createRfqFolder}
           />
         )}
         {activeView === "configurations" && (
@@ -2997,15 +3021,6 @@ export default function Home() {
           ksidProfiles={ksidProfiles}
         />
       )}
-      {showNewRfq && (
-        <NewRfqModal
-          onClose={() => setShowNewRfq(false)}
-          onCreate={createQuote}
-          jobs={jobs}
-          quotes={quotes}
-          ksidProfiles={ksidProfiles}
-        />
-      )}
       {showOldDataImport && (
         <OldDataImportModal
           onClose={() => setShowOldDataImport(false)}
@@ -3023,15 +3038,6 @@ export default function Home() {
           onOpen={openJobTab}
           onUpdate={(change) => updateJob(selectedJob.id, change)}
           onDelete={() => deleteJob(selectedJob.id)}
-          notify={notify}
-        />
-      )}
-      {selectedQuote && (
-        <QuoteDetailWindow
-          quote={selectedQuote}
-          ksidProfiles={ksidProfiles}
-          onClose={closeWorkspaceTab}
-          onUpdate={(change) => updateQuote(selectedQuote.id, change)}
           notify={notify}
         />
       )}
@@ -3080,7 +3086,7 @@ function downloadShortageListReport(jobs: Job[]) {
       [job.pn, job.rev ? `Rev ${job.rev}` : ""].filter(Boolean).join(" "),
       shortages.length
         ? shortages.map((item) =>
-            `• ${item.kspNumber || "KSP# pending"} | ${item.pnNumber || "PN# pending"} | ${item.dueDate || "No due date"}`,
+            `• ${item.kspNumber || "KSP# pending"} | ${item.pnNumber || "PN# pending"} | ${item.dueDate || "Not Set"}`,
           ).join("\n")
         : note,
     ];
@@ -3103,6 +3109,7 @@ function downloadShortageListReport(jobs: Job[]) {
       sheet["!rows"] ??= [];
       sheet["!rows"][row] = { hpt: Math.max(25, entries[row - 1][1].length * 18) };
     }
+    sheet["!autofilter"] = { ref: sheet["!ref"]! };
     XLSX.utils.book_append_sheet(workbook, sheet, name);
   }
 
@@ -3128,16 +3135,18 @@ function downloadShortageListReport(jobs: Job[]) {
 
   const supplied: [Job, ShortageItem[]][] = openJobs
     .map((job): [Job, ShortageItem[]] => [
-      job, job.shortages.filter((item) => !item.complete && item.customerSupplied),
+      job, job.shortages.filter((item) => !item.complete && item.customerSupplied && (!item.dueDate || item.dueDate <= weekEnd))
+        .sort((a, b) => (a.dueDate || "9999-12-31").localeCompare(b.dueDate || "9999-12-31")),
     ])
     .filter(([, items]) => items.length > 0)
-    .sort((a, b) => a[0].customer.localeCompare(b[0].customer));
+    .sort((a, b) => (a[1][0].dueDate || "9999-12-31").localeCompare(b[1][0].dueDate || "9999-12-31") || a[0].customer.localeCompare(b[0].customer));
   appendSheet("Customer Supplied", supplied);
 
   const needsReport = openJobs
     .filter((job) =>
       !job.noShortageList
       && job.shortages.length === 0
+      && !job.workflowCompleted.includes("shortage-list")
       && /^\d{4}-\d{2}-\d{2}$/.test(job.createdDate)
       && !Number.isNaN(new Date(`${job.createdDate}T12:00:00Z`).getTime())
       && addBusinessDays(job.createdDate, 2) <= weekEnd,
@@ -3154,8 +3163,10 @@ function downloadShortageListReport(jobs: Job[]) {
     { wch: 26 }, { wch: 17 }, { wch: 17 },
     { wch: 30 }, { wch: 30 }, { wch: 75 },
   ];
+  needsSheet["!autofilter"] = { ref: needsSheet["!ref"]! };
+  needsSheet["!rows"] = needsRows.map(() => ({ hpt: 32 }));
   XLSX.utils.book_append_sheet(workbook, needsSheet, "Need Shortage Report");
-  XLSX.writeFile(workbook, `Krypton-OOR-Shortage-List-Report-${today}.xlsx`);
+  downloadWrappedWorkbook(workbook, `Krypton-OOR-Shortage-List-Report-${today}.xlsx`);
 }
 
 function Overview({
@@ -3624,7 +3635,7 @@ function DivisionView({
                 Search jobs
                 <span>
                   <Search size={15} />
-                  <input
+                  <BufferedInput
                     value={jobSearch}
                     onChange={(event) => setJobSearch(event.target.value)}
                     placeholder="Job#, KSID, PN, Rev, PO# or *3847"
@@ -3745,7 +3756,7 @@ function DivisionView({
                 )
                 .map((job) => (
                   <label key={job.id}>
-                    <input
+                    <BufferedInput
                       type="checkbox"
                       checked={selectedJobExcelIds.includes(job.id)}
                       onChange={(event) =>
@@ -3833,7 +3844,7 @@ function DivisionView({
               </button>
               <label>
                 <Search size={15} />
-                <input
+                <BufferedInput
                   value={noFollowUpSearch}
                   onChange={(event) => setNoFollowUpSearch(event.target.value)}
                   placeholder="Search Job#"
@@ -3854,7 +3865,7 @@ function DivisionView({
                 )
                 .map((job) => (
                   <label key={job.id}>
-                    <input
+                    <BufferedInput
                       type="checkbox"
                       checked={noFollowUpIds.includes(job.id)}
                       onChange={(event) =>
@@ -3899,970 +3910,6 @@ function DivisionView({
 
 function quoteTagClass(tag: RFQTag) {
   return `rfq-tag ${tag.toLowerCase().replaceAll(" ", "-")}`;
-}
-
-function QuotesView({
-  quotes,
-  onNew,
-  onOpen,
-  onComplete,
-  onCreateFolder,
-}: {
-  quotes: QuoteRecord[];
-  onNew: () => void;
-  onOpen: (id: string) => void;
-  onComplete: (id: string, completed: boolean) => void;
-  onCreateFolder: (division: Division) => void;
-}) {
-  function customerGroups(division: Division, completed = false) {
-    return Object.entries(
-      quotes
-        .filter(
-          (quote) =>
-            quote.division === division && quote.completed === completed,
-        )
-        .reduce<Record<string, QuoteRecord[]>>((groups, quote) => {
-          (groups[quote.customer] ??= []).push(quote);
-          return groups;
-        }, {}),
-    )
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([customer, customerQuotes]) => [
-        customer,
-        [...customerQuotes].sort((a, b) =>
-          a.dueDate.localeCompare(b.dueDate),
-        ),
-      ] as const);
-  }
-
-  const urgentQuotes = [...quotes]
-    .filter((quote) => !quote.completed)
-    .filter((quote) => quoteUrgency(quote.dueDate) !== "scheduled")
-    .sort(
-      (a, b) =>
-        a.dueDate.localeCompare(b.dueDate) ||
-        a.division.localeCompare(b.division) ||
-        a.customer.localeCompare(b.customer),
-    );
-  const completedQuotes = quotes
-    .filter((quote) => quote.completed)
-    .sort(
-      (a, b) =>
-        b.dueDate.localeCompare(a.dueDate) ||
-        a.division.localeCompare(b.division) ||
-        a.customer.localeCompare(b.customer),
-    );
-  const urgencyGroups: {
-    urgency: Exclude<QuoteUrgency, "scheduled">;
-    label: string;
-    description: string;
-  }[] = [
-    {
-      urgency: "past-due",
-      label: "Past Due",
-      description: "Customer response or quote submission is overdue",
-    },
-    {
-      urgency: "due-today",
-      label: "Due Today",
-      description: "RFQs requiring action before the end of today",
-    },
-    {
-      urgency: "due-tomorrow",
-      label: "Due in 1 Day",
-      description: "RFQs approaching their deadline tomorrow",
-    },
-  ];
-
-  return (
-    <section className="view-stack quotes-view">
-      <div className="view-intro quotes-intro">
-        <div>
-          <h2>Quotes</h2>
-          <p>
-            Review RFQs by business section and customer, then open any quote
-            for its complete details and notes.
-          </p>
-        </div>
-        <div className="quotes-header-actions">
-          <button
-            className="button secondary"
-            onClick={() => onCreateFolder("Commercial")}
-            title="Create under Q:\Customer RFQs"
-          >
-            <Folder size={17} /> Create RFQ Folder for Commercial
-          </button>
-          <button
-            className="button secondary"
-            onClick={() => onCreateFolder("Aerospace")}
-            title="Create under P:\RFQs"
-          >
-            <Folder size={17} /> Create RFQ Folder for Aerospace
-          </button>
-          <button className="button primary new-rfq-button" onClick={onNew}>
-            <Plus size={17} /> New RFQ
-          </button>
-        </div>
-      </div>
-
-      <div className="quote-division-grid">
-        {(["Commercial", "Aerospace"] as Division[]).map((division) => {
-          const groups = customerGroups(division);
-          const total = groups.reduce(
-            (sum, [, customerQuotes]) => sum + customerQuotes.length,
-            0,
-          );
-          return (
-            <section className="panel quote-division-panel" key={division}>
-              <header className="quote-division-heading">
-                <span className={`division-icon ${division.toLowerCase()}`}>
-                  {division === "Commercial" ? <Factory /> : <Gauge />}
-                </span>
-                <span>
-                  <small>Business section</small>
-                  <h3>{division}</h3>
-                </span>
-                <b>{total} RFQ{total === 1 ? "" : "s"}</b>
-              </header>
-
-              {groups.length ? (
-                <div className="quote-customer-list">
-                  {groups.map(([customer, customerQuotes]) => (
-                    <section className="quote-customer-section" key={customer}>
-                      <div className="quote-customer-heading">
-                        <span>
-                          <UserRound size={15} />
-                          <strong>{customer}</strong>
-                        </span>
-                        <small>
-                          {customerQuotes.length} quote
-                          {customerQuotes.length === 1 ? "" : "s"}
-                        </small>
-                      </div>
-                      <div className="quote-table">
-                        <div className="quote-table-head">
-                          <span>Complete</span>
-                          <span>Contact</span>
-                          <span>Tags</span>
-                          <span>PN#</span>
-                          <span>Rev</span>
-                          <span>QTY</span>
-                          <span>KSID</span>
-                          <span>Due Date</span>
-                          <span />
-                        </div>
-                        {customerQuotes.map((quote) => (
-                          <div
-                            className="quote-table-row"
-                            key={quote.id}
-                            onClick={() => onOpen(quote.id)}
-                            role="button"
-                            tabIndex={0}
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter" || event.key === " ") {
-                                event.preventDefault();
-                                onOpen(quote.id);
-                              }
-                            }}
-                            aria-label={`Open ${quote.customer} RFQ for PN ${quote.pn}${quote.completed ? ", completed" : ""}`}
-                          >
-                            <span
-                              className="quote-complete-cell"
-                              onClick={(event) => event.stopPropagation()}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={quote.completed}
-                                onChange={(event) =>
-                                  onComplete(quote.id, event.target.checked)
-                                }
-                                aria-label={`Mark RFQ for PN ${quote.pn} ${quote.completed ? "incomplete" : "complete"}`}
-                              />
-                            </span>
-                            <span>{quote.contact}</span>
-                            <span className="quote-row-tags">
-                              {quote.tags.length ? (
-                                quote.tags.map((tag) => (
-                                  <em className={quoteTagClass(tag)} key={tag}>
-                                    {tag}
-                                  </em>
-                                ))
-                              ) : (
-                                <small>No tags</small>
-                              )}
-                            </span>
-                            <span>
-                              <strong>{quote.pn}</strong>
-                            </span>
-                            <span>{quote.rev || "—"}</span>
-                            <span>{quote.quantity || "—"}</span>
-                            <span>{quote.ksid || "—"}</span>
-                            <span className="quote-due-cell">
-                              <strong>{dateLabel(quote.dueDate)}</strong>
-                              {quoteUrgency(quote.dueDate) !== "scheduled" && (
-                                <em
-                                  className={`quote-urgency-badge ${quoteUrgency(quote.dueDate)}`}
-                                >
-                                  {quoteUrgencyLabel(quote.dueDate)}
-                                </em>
-                              )}
-                            </span>
-                            <ChevronRight size={17} />
-                          </div>
-                        ))}
-                      </div>
-                    </section>
-                  ))}
-                </div>
-              ) : (
-                <div className="quote-empty-state">
-                  <FileText size={28} />
-                  <strong>No {division.toLowerCase()} quotes yet</strong>
-                  <p>Use New RFQ to add the first customer quote.</p>
-                </div>
-              )}
-            </section>
-          );
-        })}
-      </div>
-
-      <section className="panel upcoming-rfq-panel">
-        <div className="panel-header upcoming-rfq-heading">
-          <div>
-            <p className="section-kicker">Deadline watch</p>
-            <h2>Upcoming RFQ</h2>
-            <p>Quotes that are past due, due today, or due within one day.</p>
-          </div>
-          <span className="upcoming-rfq-total">
-            <AlertTriangle size={15} /> {urgentQuotes.length} requiring attention
-          </span>
-        </div>
-        <div className="upcoming-rfq-grid">
-          {urgencyGroups.map((group) => {
-            const groupQuotes = urgentQuotes.filter(
-              (quote) => quoteUrgency(quote.dueDate) === group.urgency,
-            );
-            return (
-              <section
-                className={`upcoming-rfq-group ${group.urgency}`}
-                key={group.urgency}
-              >
-                <header>
-                  <span>
-                    <strong>{group.label}</strong>
-                    <small>{group.description}</small>
-                  </span>
-                  <b>{groupQuotes.length}</b>
-                </header>
-                <div className="upcoming-rfq-list">
-                  {groupQuotes.map((quote) => (
-                    <button key={quote.id} onClick={() => onOpen(quote.id)}>
-                      <span>
-                        <small>{quote.division} · {quote.customer}</small>
-                        <strong>PN {quote.pn}</strong>
-                        <em>{quote.contact} · QTY {quote.quantity || "—"}</em>
-                      </span>
-                      <span>
-                        <strong>{dateLabel(quote.dueDate)}</strong>
-                        <ChevronRight size={15} />
-                      </span>
-                    </button>
-                  ))}
-                  {!groupQuotes.length && (
-                    <div className="upcoming-rfq-empty">
-                      <CheckCircle2 size={16} /> No RFQs in this category
-                    </div>
-                  )}
-                </div>
-              </section>
-            );
-          })}
-        </div>
-      </section>
-
-      <details className="panel completed-rfqs-section">
-        <summary>
-          <span>
-            <CheckCircle2 size={18} />
-            <strong>Completed RFQs</strong>
-            <small>Archived RFQs removed from the active queue</small>
-          </span>
-          <b>{completedQuotes.length}</b>
-        </summary>
-        <div className="completed-rfqs-content">
-          {completedQuotes.length ? (
-            <div className="quote-table completed-rfq-table">
-              <div className="quote-table-head">
-                <span>Restore</span>
-                <span>Section</span>
-                <span>Customer</span>
-                <span>PN#</span>
-                <span>Rev</span>
-                <span>QTY</span>
-                <span>KSID</span>
-                <span>Due Date</span>
-                <span />
-              </div>
-              {completedQuotes.map((quote) => (
-                <div
-                  className="quote-table-row"
-                  key={quote.id}
-                  onClick={() => onOpen(quote.id)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      onOpen(quote.id);
-                    }
-                  }}
-                >
-                  <span
-                    className="quote-complete-cell"
-                    onClick={(event) => event.stopPropagation()}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={quote.completed}
-                      onChange={(event) =>
-                        onComplete(quote.id, event.target.checked)
-                      }
-                      aria-label={`Restore RFQ for PN ${quote.pn} to the active queue`}
-                    />
-                  </span>
-                  <span>{quote.division}</span>
-                  <span>{quote.customer}</span>
-                  <span><strong>{quote.pn}</strong></span>
-                  <span>{quote.rev || "—"}</span>
-                  <span>{quote.quantity || "—"}</span>
-                  <span>{quote.ksid || "—"}</span>
-                  <span>{dateLabel(quote.dueDate)}</span>
-                  <ChevronRight size={17} />
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="quote-empty-state">
-              <CheckCircle2 size={26} />
-              <strong>No completed RFQs yet</strong>
-              <p>RFQs appear here after you check them complete.</p>
-            </div>
-          )}
-        </div>
-      </details>
-    </section>
-  );
-}
-
-function NewRfqModal({
-  onClose,
-  onCreate,
-  jobs,
-  quotes,
-  ksidProfiles,
-}: {
-  onClose: () => void;
-  onCreate: (quote: QuoteRecord) => void;
-  jobs: Job[];
-  quotes: QuoteRecord[];
-  ksidProfiles: KsidProfile[];
-}) {
-  const [division, setDivision] = useState<Division>("Commercial");
-  const [tags, setTags] = useState<RFQTag[]>([]);
-  const [fields, setFields] = useState({ customer: "", contact: "", pnName: "", pn: "", rev: "", quantity: "", ksid: "", dueDate: "", notes: "" });
-  const [scanState, setScanState] = useState("");
-  const uploadRef = useRef<HTMLInputElement>(null);
-  const customerSuggestions = useMemo(
-    () =>
-      Array.from(
-        new Set([
-          ...jobs
-            .filter((job) => job.division === division)
-            .map((job) => job.customer.trim()),
-          ...quotes
-            .filter((quote) => quote.division === division)
-            .map((quote) => quote.customer.trim()),
-        ]),
-      )
-        .filter(Boolean)
-        .sort((a, b) => a.localeCompare(b)),
-    [division, jobs, quotes],
-  );
-
-  function updateField(key: keyof typeof fields, value: string) {
-    setFields((current) => ({ ...current, [key]: value }));
-  }
-
-  function applyKsid() {
-    const profile = ksidProfileFor(fields.ksid, ksidProfiles);
-    if (!fields.ksid.trim()) {
-      setFields((current) => ({
-        ...current,
-        customer: "",
-        contact: "",
-        pnName: "",
-        pn: "",
-        rev: "",
-      }));
-      return;
-    }
-    if (!profile) return;
-    setFields((current) => ({
-      ...current,
-      customer: profile.customer,
-      contact: profile.contact,
-      pnName: profile.pnName,
-      pn: profile.pn,
-      rev: profile.rev,
-    }));
-    setDivision(profile.division);
-    setScanState(
-      `KSID matched. PN details and the most recent ${profile.division} customer folder were filled in; every field remains editable.`,
-    );
-  }
-
-  async function scanRfqPhoto(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    setScanState("Scanning photo and locating RFQ details…");
-    try {
-      const text = await recognizeScreenshot(file);
-      const detected = parseRfqScreenshot(text);
-      const profile = ksidProfileFor(detected.ksid, ksidProfiles);
-      setTags(detected.tags);
-      setFields((current) => ({
-        ...current,
-        contact: detected.contact || profile?.contact || "",
-        pnName: profile?.pnName || current.pnName,
-        pn: detected.pn || profile?.pn || "",
-        rev: detected.rev || profile?.rev || "",
-        customer: profile?.customer || current.customer,
-        ksid: detected.ksid,
-        dueDate: detected.dueDate,
-      }));
-      if (profile) setDivision(profile.division);
-      const populated = [detected.contact, detected.pn, detected.rev, detected.ksid, detected.dueDate].filter(Boolean).length;
-      setScanState(`Scan complete. ${populated} details populated. Review the red Missing cues, edit anything needed, then book the RFQ.`);
-    } catch {
-      setScanState("The photo could not be read. You can still enter or book the RFQ manually.");
-    }
-    event.target.value = "";
-  }
-
-  const missing = (value: string, optional = false) => !optional && !value.trim();
-  const missingCue = (isMissing: boolean) => isMissing ? <span className="rfq-missing-cue">Missing</span> : null;
-
-  function toggleTag(tag: RFQTag) {
-    setTags((current) =>
-      current.includes(tag)
-        ? current.filter((item) => item !== tag)
-        : [...current, tag],
-    );
-  }
-
-  function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const initialNote = fields.notes.trim();
-    const now = new Date().toISOString();
-    onCreate({
-      id: makeId("rfq"),
-      division,
-      customer: fields.customer.trim(),
-      tags,
-      contact: fields.contact.trim(),
-      pnName: fields.pnName.trim(),
-      pn: fields.pn.trim(),
-      quantity: fields.quantity.trim(),
-      rev: fields.rev.trim(),
-      ksid: fields.ksid.trim(),
-      dueDate: fields.dueDate,
-      createdAt: now,
-      completed: false,
-      notes: initialNote
-        ? [
-            {
-              id: makeId("quote-note"),
-              date: chicagoDateKey(),
-              createdAt: now,
-              text: initialNote,
-            },
-          ]
-        : [],
-    });
-  }
-
-  return (
-    <div
-      className="modal-layer"
-      onMouseDown={(event) => event.target === event.currentTarget && onClose()}
-    >
-      <form className="modal-card new-rfq-modal" onSubmit={submit}>
-        <div className="modal-header">
-          <div>
-            <p className="section-kicker">Quotes · New request</p>
-            <h2>New RFQ</h2>
-            <p>Add the customer, part details, due date, and quote tags.</p>
-          </div>
-          <button
-            type="button"
-            className="icon-button"
-            aria-label="Close New RFQ"
-            onClick={onClose}
-          >
-            <X />
-          </button>
-        </div>
-
-        <section className="rfq-photo-scan">
-          <span className="smart-import-icon"><ImageIcon /></span>
-          <div>
-            <strong>Scan RFQ photo</strong>
-            <small>Recognizes tags, Contact, PN#, Rev, optional KSID, and the due date. Enter QTY manually.</small>
-            {scanState && <em>{scanState}</em>}
-          </div>
-          <button type="button" className="button secondary" onClick={() => uploadRef.current?.click()}>
-            <Upload size={16} /> Upload photo
-          </button>
-          <input ref={uploadRef} hidden type="file" accept="image/*" onChange={scanRfqPhoto} />
-        </section>
-
-        <fieldset className="division-picker rfq-division-picker">
-          <legend>Selection</legend>
-          {(["Commercial", "Aerospace"] as Division[]).map((item) => (
-            <label key={item} className={division === item ? "selected" : ""}>
-              <input
-                type="radio"
-                checked={division === item}
-                onChange={() => setDivision(item)}
-              />
-              <span className={`division-icon ${item.toLowerCase()}`}>
-                {item === "Commercial" ? <Factory /> : <Gauge />}
-              </span>
-              <span>
-                <strong>{item}</strong>
-                <small>Save in the {item} quote area</small>
-              </span>
-            </label>
-          ))}
-        </fieldset>
-
-        <div className="rfq-form-grid">
-          <label className="wide">
-            Existing Customer or New Customer {missingCue(missing(fields.customer))}
-            <input
-              className={missing(fields.customer) ? "missing-input" : ""}
-              list={`quote-customer-options-${division.toLowerCase()}`}
-              value={fields.customer}
-              onChange={(event) => updateField("customer", event.target.value)}
-              placeholder="Search existing customers or type a new one"
-            />
-            <datalist id={`quote-customer-options-${division.toLowerCase()}`}>
-              {customerSuggestions.map((customer) => (
-                <option key={customer} value={customer} />
-              ))}
-            </datalist>
-            <small>
-              Select a saved customer to avoid duplicates. A new name creates a new quote customer group.
-            </small>
-          </label>
-          <label className="wide">
-            Contact {missingCue(missing(fields.contact))}
-            <input className={missing(fields.contact) ? "missing-input" : ""} value={fields.contact} onChange={(event) => updateField("contact", event.target.value)} />
-          </label>
-          <label>
-            PN Name {missingCue(missing(fields.pnName))}
-            <input className={missing(fields.pnName) ? "missing-input" : ""} value={fields.pnName} onChange={(event) => updateField("pnName", event.target.value)} />
-          </label>
-          <label>
-            PN# {missingCue(missing(fields.pn))}
-            <input className={missing(fields.pn) ? "missing-input" : ""} value={fields.pn} onChange={(event) => updateField("pn", event.target.value)} />
-          </label>
-          <label>
-            Rev {missingCue(missing(fields.rev))}
-            <input className={missing(fields.rev) ? "missing-input" : ""} value={fields.rev} onChange={(event) => updateField("rev", event.target.value)} />
-          </label>
-          <label>
-            QTY {missingCue(missing(fields.quantity))}
-            <input className={missing(fields.quantity) ? "missing-input" : ""} value={fields.quantity} type="text" inputMode="numeric" onChange={(event) => updateField("quantity", event.target.value)} />
-          </label>
-          <label>
-            KSID <span>(if applicable)</span>
-            <input value={fields.ksid} onChange={(event) => updateField("ksid", event.target.value)} onBlur={applyKsid} />
-          </label>
-          <label>
-            Due Date {missingCue(missing(fields.dueDate))}
-            <input className={missing(fields.dueDate) ? "missing-input" : ""} value={fields.dueDate} type="date" onChange={(event) => updateField("dueDate", event.target.value)} />
-          </label>
-        </div>
-
-        <fieldset className="rfq-tag-picker">
-          <legend>Tags <span>(select any that apply)</span> {missingCue(tags.length === 0)}</legend>
-          <div>
-            {rfqTags.map((tag) => (
-              <label
-                className={`${quoteTagClass(tag)} ${tags.includes(tag) ? "selected" : ""}`}
-                key={tag}
-              >
-                <input
-                  type="checkbox"
-                  checked={tags.includes(tag)}
-                  onChange={() => toggleTag(tag)}
-                />
-                {tags.includes(tag) && <Check size={12} />}
-                {tag}
-              </label>
-            ))}
-          </div>
-        </fieldset>
-
-        <label className="rfq-notes-field">
-          Notes
-          <textarea
-            value={fields.notes}
-            onChange={(event) => updateField("notes", event.target.value)}
-            rows={4}
-            placeholder="Add the first RFQ note…"
-          />
-        </label>
-
-        <div className="modal-actions">
-          <button type="button" className="button ghost" onClick={onClose}>
-            Cancel
-          </button>
-          <button className="button primary">
-            <Plus size={16} /> Book RFQ
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-function QuoteDetailWindow({
-  quote,
-  ksidProfiles,
-  onClose,
-  onUpdate,
-  notify,
-}: {
-  quote: QuoteRecord;
-  ksidProfiles: KsidProfile[];
-  onClose: () => void;
-  onUpdate: (change: Partial<QuoteRecord>) => void;
-  notify: (message: string) => void;
-}) {
-  const [noteDate, setNoteDate] = useState(chicagoDateKey());
-  const [noteText, setNoteText] = useState("");
-  const [editingDetails, setEditingDetails] = useState(false);
-
-  function updateQuoteKsid(value: string) {
-    const profile = ksidProfileFor(value, ksidProfiles);
-    onUpdate({
-      ksid: value,
-      ...(profile
-        ? {
-            division: profile.division,
-            customer: profile.customer,
-            contact: profile.contact,
-            pnName: profile.pnName,
-            pn: profile.pn,
-            rev: profile.rev,
-          }
-        : !value.trim()
-          ? { customer: "", contact: "", pnName: "", pn: "", rev: "" }
-          : {}),
-    });
-    if (profile) {
-      notify(
-        "KSID matched. Quote part details and the most recent customer folder were filled in and remain editable.",
-      );
-    }
-  }
-
-  function toggleQuoteTag(tag: RFQTag) {
-    onUpdate({
-      tags: quote.tags.includes(tag)
-        ? quote.tags.filter((item) => item !== tag)
-        : [...quote.tags, tag],
-    });
-  }
-
-  function addNote(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!noteText.trim()) return;
-    onUpdate({
-      notes: [
-        {
-          id: makeId("quote-note"),
-          date: noteDate,
-          createdAt: new Date().toISOString(),
-          text: noteText.trim(),
-        },
-        ...quote.notes,
-      ],
-    });
-    setNoteText("");
-    notify("Quote note saved.");
-  }
-
-  const notes = [...quote.notes].sort((a, b) =>
-    `${b.date}${b.createdAt}`.localeCompare(`${a.date}${a.createdAt}`),
-  );
-
-  return (
-    <div
-      className="modal-layer quote-detail-layer"
-      onMouseDown={(event) => event.target === event.currentTarget && onClose()}
-    >
-      <article className="modal-card quote-detail-card" role="dialog" aria-modal="true">
-        <div className="modal-header quote-detail-header">
-          <div>
-            <p className="section-kicker">
-              {quote.division} · {quote.customer}
-            </p>
-            <h2>RFQ · PN {quote.pn}</h2>
-            <p>Created {dateLabel(quote.createdAt.slice(0, 10))}</p>
-          </div>
-          <div className="quote-detail-header-actions">
-            <button
-              className={`button small ${editingDetails ? "primary" : "secondary"}`}
-              onClick={() => setEditingDetails((current) => !current)}
-            >
-              <Settings2 size={15} />
-              {editingDetails ? "Done editing" : "Edit quote details"}
-            </button>
-            <button
-              className={`button small ${quote.completed ? "primary" : "secondary"}`}
-              onClick={() => onUpdate({ completed: !quote.completed })}
-            >
-              <CheckCircle2 size={15} />
-              {quote.completed ? "Completed" : "Mark complete"}
-            </button>
-            <button className="icon-button" aria-label="Close quote" onClick={onClose}>
-              <X />
-            </button>
-          </div>
-        </div>
-
-        <div className="quote-detail-layout">
-          <section className="quote-detail-information">
-            <div className="quote-detail-title">
-              <FileText size={19} />
-              <span>
-                <small>Quote details</small>
-                <strong>{quote.customer}</strong>
-              </span>
-            </div>
-            {editingDetails ? (
-              <div className="quote-detail-edit-form">
-                <label>
-                  Business Section
-                  <select
-                    value={quote.division}
-                    onChange={(event) =>
-                      onUpdate({ division: event.target.value as Division })
-                    }
-                  >
-                    <option>Commercial</option>
-                    <option>Aerospace</option>
-                  </select>
-                </label>
-                <label>
-                  Customer Name
-                  <input
-                    value={quote.customer}
-                    onChange={(event) => onUpdate({ customer: event.target.value })}
-                  />
-                </label>
-                <label>
-                  Contact
-                  <input
-                    value={quote.contact}
-                    onChange={(event) => onUpdate({ contact: event.target.value })}
-                  />
-                </label>
-                <label>
-                  PN Name
-                  <input
-                    value={quote.pnName}
-                    onChange={(event) => onUpdate({ pnName: event.target.value })}
-                  />
-                </label>
-                <label>
-                  PN#
-                  <input
-                    value={quote.pn}
-                    onChange={(event) => onUpdate({ pn: event.target.value })}
-                  />
-                </label>
-                <label>
-                  Rev
-                  <input
-                    value={quote.rev}
-                    onChange={(event) => onUpdate({ rev: event.target.value })}
-                  />
-                </label>
-                <label>
-                  QTY
-                  <input
-                    className={quote.quantity === "" ? "missing-input" : ""}
-                    type="text"
-                    inputMode="numeric"
-                    value={quote.quantity}
-                    onChange={(event) => onUpdate({ quantity: event.target.value })}
-                  />
-                </label>
-                <label>
-                  KSID <span>(if applicable)</span>
-                  <input
-                    value={quote.ksid}
-                    onChange={(event) => onUpdate({ ksid: event.target.value })}
-                    onBlur={() => updateQuoteKsid(quote.ksid)}
-                  />
-                </label>
-                <label>
-                  Due Date
-                  <input
-                    type="date"
-                    value={quote.dueDate}
-                    onChange={(event) => onUpdate({ dueDate: event.target.value })}
-                  />
-                </label>
-                <fieldset className="quote-edit-tags">
-                  <legend>Tags</legend>
-                  <div>
-                    {rfqTags.map((tag) => (
-                      <label
-                        className={`${quoteTagClass(tag)} ${quote.tags.includes(tag) ? "selected" : ""}`}
-                        key={tag}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={quote.tags.includes(tag)}
-                          onChange={() => toggleQuoteTag(tag)}
-                        />
-                        {quote.tags.includes(tag) && <Check size={12} />}
-                        {tag}
-                      </label>
-                    ))}
-                  </div>
-                </fieldset>
-              </div>
-            ) : (
-              <div className="quote-detail-fields">
-              <div>
-                <small>Business Section</small>
-                <strong>{quote.division}</strong>
-              </div>
-              <div>
-                <small>Customer Name</small>
-                <strong>{quote.customer}</strong>
-              </div>
-              <div>
-                <small>Contact</small>
-                <strong>{quote.contact}</strong>
-              </div>
-              <div>
-                <small>PN Name</small>
-                <strong>{quote.pnName || "—"}</strong>
-              </div>
-              <div>
-                <small>PN#</small>
-                <strong>{quote.pn}</strong>
-              </div>
-              <div>
-                <small>Rev</small>
-                <strong>{quote.rev || "—"}</strong>
-              </div>
-              <div>
-                <small>QTY</small>
-                <strong>{quote.quantity || "—"}</strong>
-              </div>
-              <div>
-                <small>KSID</small>
-                <strong>{quote.ksid || "Not applicable"}</strong>
-              </div>
-              <div>
-                <small>Due Date</small>
-                <strong>{dateLabel(quote.dueDate)}</strong>
-              </div>
-              <div className="quote-detail-tags-field">
-                <small>Tags</small>
-                <span className="quote-row-tags">
-                  {quote.tags.length ? (
-                    quote.tags.map((tag) => (
-                      <em className={quoteTagClass(tag)} key={tag}>
-                        {tag}
-                      </em>
-                    ))
-                  ) : (
-                    <strong>None</strong>
-                  )}
-                </span>
-              </div>
-              </div>
-            )}
-          </section>
-
-          <aside className="quote-notes-panel">
-            <div className="quote-notes-heading">
-              <span>
-                <StickyNote size={17} />
-                <strong>RFQ Notes</strong>
-              </span>
-              <small>{notes.length} note{notes.length === 1 ? "" : "s"}</small>
-            </div>
-            <form className="quote-note-form" onSubmit={addNote}>
-              <label>
-                Note date
-                <input
-                  type="date"
-                  value={noteDate}
-                  onChange={(event) => setNoteDate(event.target.value)}
-                  required
-                />
-              </label>
-              <label>
-                New note
-                <textarea
-                  rows={4}
-                  value={noteText}
-                  onChange={(event) => setNoteText(event.target.value)}
-                  placeholder="Add customer feedback, pricing status, or next steps…"
-                  required
-                />
-              </label>
-              <button className="button primary">
-                <Plus size={15} /> Add note
-              </button>
-            </form>
-            <div className="quote-note-list">
-              {notes.map((note) => (
-                <article key={note.id}>
-                  <div>
-                    <strong>{dateLabel(note.date)}</strong>
-                    <small>
-                      {new Date(note.createdAt).toLocaleTimeString("en-US", {
-                        hour: "numeric",
-                        minute: "2-digit",
-                      })}
-                    </small>
-                  </div>
-                  <p>{note.text}</p>
-                </article>
-              ))}
-              {!notes.length && (
-                <div className="quote-notes-empty">
-                  <StickyNote size={22} />
-                  <span>No notes have been added yet.</span>
-                </div>
-              )}
-            </div>
-          </aside>
-        </div>
-      </article>
-    </div>
-  );
 }
 
 function DockAlertChart({
@@ -5046,6 +4093,8 @@ function ActionItemsView({
                   <span>Customer</span>
                   <span>Job #</span>
                   <span>KSID #</span>
+                  <span>PN Name</span>
+                  <span>PN</span>
                   <span>Actions needed</span>
                   <span>Next due</span>
                   <span>Follow-Up Later</span>
@@ -5073,6 +4122,8 @@ function ActionItemsView({
                     <strong>{first.customer}</strong>
                     <span>#{first.jobNumber}</span>
                     <span>{first.ksid}</span>
+                    <span>{jobs.find((job) => job.id === first.jobId)?.pnName || "Not set"}</span>
+                    <span>{jobs.find((job) => job.id === first.jobId)?.pn || "Not set"}</span>
                     <span className="action-summary-copy">{group.length} action{group.length === 1 ? "" : "s"}<ChevronDown size={15} /></span>
                     <span className={daysUntil(nextDue.dueDate) < 0 ? "urgent" : ""}>
                       {dateLabel(nextDue.dueDate)}<small>{dueCopy(nextDue.dueDate)}</small>
@@ -5166,7 +4217,7 @@ function ActionItemsView({
                           className="deferred-action-open"
                           onClick={() => onOpen(first.jobId)}
                         >
-                          <span><strong>{first.customer}</strong><small>Job #{first.jobNumber} · KSID {first.ksid}</small></span>
+                          <span><strong>{first.customer}</strong><small>Job #{first.jobNumber} · KSID {first.ksid}</small><small>PN Name: {job?.pnName || "Not set"} · PN: {job?.pn || "Not set"}</small></span>
                           <span>{group.length} action{group.length === 1 ? "" : "s"}</span>
                           <span><small>Returns to main list</small><strong>{dateLabel(job?.actionDeferredUntil ?? "")}</strong></span>
                           <ChevronRight size={17} />
@@ -5336,6 +4387,8 @@ function FollowUpListView({
                               </span>
                               <h3>Job #{item.job.jobNumber}</h3>
                               <small>KSID #{item.job.ksid}</small>
+                              <small>PN Name: {item.job.pnName || "Not set"}</small>
+                              <small>PN: {item.job.pn || "Not set"}</small>
                             </div>
                             <div>
                               <small>Status</small>
@@ -5376,7 +4429,7 @@ function FollowUpListView({
                           >
                             <label>
                               Note date
-                              <input
+                              <BufferedInput
                                 type="date"
                                 value={dates[item.job.id] || chicagoDateKey()}
                                 onChange={(event) =>
@@ -5389,7 +4442,7 @@ function FollowUpListView({
                             </label>
                             <label>
                               Add follow-up note
-                              <textarea
+                              <BufferedTextarea
                                 rows={2}
                                 value={drafts[item.job.id] || ""}
                                 onChange={(event) =>
@@ -5576,7 +4629,7 @@ function ShortagesView({
         <span>
           <FileSpreadsheet size={18} /> Headers: KSP#, PN#, Due Date
         </span>
-        <input
+        <BufferedInput
           ref={fileRef}
           type="file"
           accept=".xlsx,.xls,.csv,image/*"
@@ -5696,7 +4749,6 @@ function ShortageEditor({
       const updated = {
         ...item,
         ...change,
-        ...(change.customerSupplied === true ? { dueDate: "" } : {}),
       };
       return refreshAutomaticRules
         ? applyShortageAutomation(updated, job)
@@ -5706,6 +4758,7 @@ function ShortageEditor({
   }
   function finishCommentEdit(id: string, value: string) {
     const comments = reconcileObsoleteComment(value);
+    if (job.shortages.find((item) => item.id === id)?.comments === comments) return;
     onUpdate({
       shortages: job.shortages.map((item) =>
         item.id === id ? { ...item, comments } : item,
@@ -5742,7 +4795,7 @@ function ShortageEditor({
     notify("Shortage item added.");
   }
   const datedOpenItems = job.shortages.filter(
-    (item) => !item.complete && !item.customerSupplied && item.dueDate,
+    (item) => !item.complete && item.dueDate,
   );
   const longestShortageDate = latestDate(
     datedOpenItems.map((item) => item.dueDate),
@@ -5756,7 +4809,7 @@ function ShortageEditor({
     const rows = job.shortages.filter((item) => !item.complete).map((item) => ({
       pn: item.pnNumber,
       qty: item.quantity,
-      due: item.customerSupplied ? "CUSTOMER SUPPLIED" : dateLabel(item.dueDate),
+      due: item.dueDate ? dateLabel(item.dueDate) : "Not Set",
       comments: item.comments,
       className: hasObsoleteComment(item.comments)
         ? "obsolete"
@@ -5850,7 +4903,7 @@ function ShortageEditor({
         </div>
       </div>
       <label className="no-shortage-toggle">
-        <input
+        <BufferedInput
           type="checkbox"
           checked={job.noShortageList}
           onChange={(event) => setNoShortageList(event.target.checked)}
@@ -5865,7 +4918,7 @@ function ShortageEditor({
       </label>
       <label className="all-parts-received">
         All Parts Received
-        <input
+        <BufferedInput
           type="date"
           value={job.allPartsReceivedDate}
           onChange={(event) => onUpdate({ allPartsReceivedDate: event.target.value })}
@@ -5890,7 +4943,7 @@ function ShortageEditor({
           <form className="shortage-add" onSubmit={add}>
             <label>
               KSP#
-              <input
+              <BufferedInput
                 value={ksp}
                 onChange={(event) => setKsp(event.target.value)}
                 placeholder="KSP-0000"
@@ -5898,7 +4951,7 @@ function ShortageEditor({
             </label>
             <label>
               PN#
-              <input
+              <BufferedInput
                 value={pn}
                 onChange={(event) => setPn(event.target.value)}
                 placeholder="Part number"
@@ -5906,7 +4959,7 @@ function ShortageEditor({
             </label>
             <label>
               QTY
-              <input
+              <BufferedInput
                 value={quantity}
                 onChange={(event) => setQuantity(event.target.value)}
                 placeholder="Quantity"
@@ -5914,11 +4967,11 @@ function ShortageEditor({
             </label>
             <label>
               Due Date
-              <input type="date" value={due} onChange={(event) => setDue(event.target.value)} />
+              <BufferedInput type="date" value={due} onChange={(event) => setDue(event.target.value)} />
             </label>
             <label className="shortage-comments-field">
               Additional Comments
-              <input
+              <BufferedInput
                 value={comments}
                 onChange={(event) => setComments(event.target.value)}
                 placeholder="Supplier update, hold reason, or details"
@@ -5946,7 +4999,7 @@ function ShortageEditor({
                 </small>
                 {pasteMessage && <em>{pasteMessage}</em>}
               </div>
-              <textarea
+              <BufferedTextarea
                 aria-label="Paste Excel shortage table"
                 value={shortagePaste}
                 onChange={(event) => setShortagePaste(event.target.value)}
@@ -6000,7 +5053,7 @@ function ShortageEditor({
                 >
                   {item.complete && <Check size={15} />}
                 </button>
-                <input
+                <BufferedInput
                   className={!item.kspNumber ? "missing-shortage" : ""}
                   aria-label="KSP number"
                   value={item.kspNumber}
@@ -6009,7 +5062,7 @@ function ShortageEditor({
                   }
                   placeholder="★ KSP#"
                 />
-                <input
+                <BufferedInput
                   className={!item.pnNumber ? "missing-shortage" : ""}
                   aria-label="Part number"
                   value={item.pnNumber}
@@ -6018,7 +5071,7 @@ function ShortageEditor({
                   }
                   placeholder="★ PN#"
                 />
-                <input
+                <BufferedInput
                   className={!item.quantity ? "missing-shortage" : ""}
                   aria-label="Shortage quantity"
                   value={item.quantity}
@@ -6028,7 +5081,7 @@ function ShortageEditor({
                   placeholder="★ QTY"
                 />
                 <div className="shortage-due-control">
-                  <input
+                  <BufferedInput
                     className={!item.dueDate ? "missing-shortage" : !item.complete && daysUntil(item.dueDate) < 0 ? "urgent-input" : ""}
                     aria-label="Shortage due date"
                     type="date"
@@ -6039,7 +5092,7 @@ function ShortageEditor({
                   />
                 </div>
                 <label className="shortage-supply-control">
-                  <input
+                  <BufferedInput
                     type="checkbox"
                     aria-label={`Customer supplied ${item.pnNumber || item.kspNumber || "shortage item"}`}
                     checked={item.customerSupplied}
@@ -6053,7 +5106,7 @@ function ShortageEditor({
                     {item.customerSupplied ? "CUSTOMER SUPPLIED" : "No"}
                   </span>
                 </label>
-                <input
+                <BufferedInput
                   aria-label="Shortage comments"
                   value={item.comments}
                   onChange={(event) =>
@@ -6368,7 +5421,7 @@ function WeeklyNotepad({
               selectedDay.tasks.map((task) => (
                 <div className={`notepad-task ${task.complete ? "complete" : ""}`} key={task.id}>
                   <label>
-                    <input
+                    <BufferedInput
                       type="checkbox"
                       checked={task.complete}
                       onChange={(event) =>
@@ -6403,7 +5456,7 @@ function WeeklyNotepad({
             )}
           </div>
           <form className="notepad-add" onSubmit={addTask}>
-            <input
+            <BufferedInput
               aria-label="New weekly task"
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
@@ -6420,7 +5473,7 @@ function WeeklyNotepad({
           <div className="meeting-notes-toolbar">
             <label>
               <span>Meeting date</span>
-              <input
+              <BufferedInput
                 type="date"
                 value={meetingDate}
                 onChange={(event) => setMeetingDate(event.target.value)}
@@ -6461,7 +5514,7 @@ function WeeklyNotepad({
             </label>
           </div>
           <form className="meeting-note-add" onSubmit={addMeetingNote}>
-            <textarea
+            <BufferedTextarea
               aria-label="New meeting note"
               value={meetingDraft}
               onChange={(event) => setMeetingDraft(event.target.value)}
@@ -6548,7 +5601,7 @@ function IntegrationsView({
             <small>Move everything to another computer</small>
             <h3>Complete backup &amp; restore</h3>
             <p>
-              Export all jobs, quotes, shortages, notes, tracking, completed
+              Export all jobs, shortages, notes, tracking, completed
               records, Mechanical Config presets, Project Families,
               Manufacturing organization folders, and Weekly Actions. Import
               the same workbook on another computer to restore the exact saved
@@ -6561,7 +5614,7 @@ function IntegrationsView({
             </button>
             <label className="button secondary full backup-import-button">
               <Upload size={16} /> Import complete backup
-              <input
+              <BufferedInput
                 type="file"
                 accept=".xlsx"
                 onChange={onImportBackup}
@@ -6962,7 +6015,7 @@ function AssemblyConfigurationsView({
         <div className="assembly-level-picker">
           {(["CCA", "LRU"] as AssemblyRecipe["outputLevel"][]).map((level) => (
             <label className={outputLevel === level ? "selected" : ""} key={level}>
-              <input
+              <BufferedInput
                 type="radio"
                 checked={outputLevel === level}
                 onChange={() => changeLevel(level)}
@@ -6977,7 +6030,7 @@ function AssemblyConfigurationsView({
         <div className="assembly-preset-details">
           <label>
             Output KSID
-            <input
+            <BufferedInput
               value={outputKsid}
               onChange={(event) => setOutputKsid(event.target.value)}
               onBlur={() => updateOutputKsid(outputKsid)}
@@ -6998,7 +6051,7 @@ function AssemblyConfigurationsView({
           </label>
           <label>
             Customer Sub-Category / Folder
-            <input
+            <BufferedInput
               list={`mechanical-customer-options-${division.toLowerCase()}`}
               value={customer}
               onChange={(event) => setCustomer(event.target.value)}
@@ -7014,21 +6067,21 @@ function AssemblyConfigurationsView({
           </label>
           <label>
             PN Name
-            <input
+            <BufferedInput
               value={pnName}
               onChange={(event) => setPnName(event.target.value)}
             />
           </label>
           <label>
             Contact
-            <input
+            <BufferedInput
               value={contact}
               onChange={(event) => setContact(event.target.value)}
             />
           </label>
           <label>
             Mechanical Assembly Turn Time
-            <input
+            <BufferedInput
               type="number"
               min="0"
               value={assemblyTurnDays}
@@ -7043,15 +6096,15 @@ function AssemblyConfigurationsView({
         <div className="assembly-output-grid">
           <label>
             Configuration Name
-            <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Example: HVDU LRU" />
+            <BufferedInput value={name} onChange={(event) => setName(event.target.value)} placeholder="Example: HVDU LRU" />
           </label>
           <label>
             Output {outputLevel} PN#
-            <input value={outputPn} onChange={(event) => setOutputPn(event.target.value)} placeholder="Finished assembly PN" />
+            <BufferedInput value={outputPn} onChange={(event) => setOutputPn(event.target.value)} placeholder="Finished assembly PN" />
           </label>
           <label>
             Output Rev <span>(optional)</span>
-            <input value={outputRev} onChange={(event) => setOutputRev(event.target.value)} />
+            <BufferedInput value={outputRev} onChange={(event) => setOutputRev(event.target.value)} />
           </label>
         </div>
         <div className="assembly-requirements-editor">
@@ -7104,7 +6157,7 @@ function AssemblyConfigurationsView({
               ) : (
                 <strong>PCBA</strong>
               )}
-              <input
+              <BufferedInput
                 value={requirement.ksid}
                 onChange={(event) =>
                   updateRequirement(requirement.id, { ksid: event.target.value })
@@ -7114,7 +6167,7 @@ function AssemblyConfigurationsView({
                 }
                 placeholder="KSID"
               />
-              <input
+              <BufferedInput
                 value={requirement.pnName}
                 onChange={(event) =>
                   updateRequirement(requirement.id, {
@@ -7123,9 +6176,9 @@ function AssemblyConfigurationsView({
                 }
                 placeholder="Component name"
               />
-              <input value={requirement.pn} onChange={(event) => updateRequirement(requirement.id, { pn: event.target.value })} placeholder="Part number" />
-              <input value={requirement.rev} onChange={(event) => updateRequirement(requirement.id, { rev: event.target.value })} placeholder="Any" />
-              <input className={requirement.quantityPerAssembly === "" ? "missing-input" : ""} type="text" inputMode="numeric" value={requirement.quantityPerAssembly} onChange={(event) => updateRequirement(requirement.id, { quantityPerAssembly: event.target.value === "" ? "" : Math.max(1, Number(event.target.value) || 1) })} />
+              <BufferedInput value={requirement.pn} onChange={(event) => updateRequirement(requirement.id, { pn: event.target.value })} placeholder="Part number" />
+              <BufferedInput value={requirement.rev} onChange={(event) => updateRequirement(requirement.id, { rev: event.target.value })} placeholder="Any" />
+              <BufferedInput className={requirement.quantityPerAssembly === "" ? "missing-input" : ""} type="text" inputMode="numeric" value={requirement.quantityPerAssembly} onChange={(event) => updateRequirement(requirement.id, { quantityPerAssembly: event.target.value === "" ? "" : Math.max(1, Number(event.target.value) || 1) })} />
               <button type="button" className="icon-button" aria-label="Remove requirement" disabled={requirements.length === 1} onClick={() => setRequirements((current) => current.filter((item) => item.id !== requirement.id))}>
                 <Trash2 size={16} />
               </button>
@@ -7262,7 +6315,7 @@ function NewJobModal({
           <legend>Business section</legend>
           {(["Commercial", "Aerospace"] as Division[]).map((item) => (
             <label key={item} className={division === item ? "selected" : ""}>
-              <input
+              <BufferedInput
                 type="radio"
                 checked={division === item}
                 onChange={() => setDivision(item)}
@@ -7280,18 +6333,18 @@ function NewJobModal({
         <div className="job-form-grid">
           <label className="wide">
             Customer Sub-Category / Folder
-            <input name="customer" required placeholder="Example: Fujitsu" />
+            <BufferedInput name="customer" required placeholder="Example: Fujitsu" />
           </label>
           <label>
-            Job #<input name="jobNumber" required />
+            Job #<BufferedInput name="jobNumber" required />
           </label>
           <label>
             KSID
-            <input name="ksid" required />
+            <BufferedInput name="ksid" required />
           </label>
           <label className="wide">
             PN Name
-            <input
+            <BufferedInput
               name="pnName"
               required
               placeholder="Part number and description"
@@ -7299,7 +6352,7 @@ function NewJobModal({
           </label>
           <label>
             Rev
-            <input name="rev" required />
+            <BufferedInput name="rev" required />
           </label>
           <label>
             Project Type
@@ -7311,19 +6364,19 @@ function NewJobModal({
           </label>
           <label>
             Contact
-            <input name="contact" required />
+            <BufferedInput name="contact" required />
           </label>
           <label>
             Due Date
-            <input name="dueDate" type="date" required />
+            <BufferedInput name="dueDate" type="date" required />
           </label>
           <label>
             PO#
-            <input name="poNumber" />
+            <BufferedInput name="poNumber" />
           </label>
           <label>
             Quote#
-            <input name="quoteNumber" />
+            <BufferedInput name="quoteNumber" />
           </label>
           <label>
             Status
@@ -7335,7 +6388,7 @@ function NewJobModal({
           </label>
           <label>
             Project Creation Date
-            <input
+            <BufferedInput
               name="createdDate"
               type="date"
               defaultValue={chicagoDateKey()}
@@ -7344,7 +6397,7 @@ function NewJobModal({
           </label>
           <label>
             Project Confirmation Date
-            <input name="confirmedDate" type="date" />
+            <BufferedInput name="confirmedDate" type="date" />
           </label>
           <label>
             SMT Process Turn Time
@@ -7360,7 +6413,7 @@ function NewJobModal({
         <fieldset className="process-picker">
           <legend>Special Processes</legend>
           <label>
-            <input
+            <BufferedInput
               type="checkbox"
               checked={polymerics}
               onChange={(event) => setPolymerics(event.target.checked)}
@@ -7368,7 +6421,7 @@ function NewJobModal({
             Polymerics
           </label>
           <label>
-            <input
+            <BufferedInput
               type="checkbox"
               checked={externalTesting}
               onChange={(event) => setExternalTesting(event.target.checked)}
@@ -7376,7 +6429,7 @@ function NewJobModal({
             External Testing
           </label>
           <label>
-            <input
+            <BufferedInput
               type="checkbox"
               checked={faiReport}
               onChange={(event) => setFaiReport(event.target.checked)}
@@ -7384,7 +6437,7 @@ function NewJobModal({
             FAI Report
           </label>
           <label>
-            <input
+            <BufferedInput
               type="checkbox"
               checked={otherProcess}
               onChange={(event) => {
@@ -7405,7 +6458,7 @@ function NewJobModal({
               <span>Polymerics options</span>
               {polymericsOptions.map((item) => (
                 <label key={item}>
-                  <input
+                  <BufferedInput
                     type="checkbox"
                     checked={selectedPoly.includes(item)}
                     onChange={(event) =>
@@ -7424,7 +6477,7 @@ function NewJobModal({
         </fieldset>
         <label className="initial-note">
           Initial dated note <span>(optional)</span>
-          <textarea
+          <BufferedTextarea
             name="initialNote"
             rows={3}
             placeholder="Add the first booking update…"
@@ -8397,7 +7450,7 @@ function shortageDueMetadata(value: unknown) {
   const customerSupplied = /customer\s*supplied/i.test(text);
   const obsolete = /\bobsolete\b/i.test(text);
   return {
-    dueDate: customerSupplied ? "" : normalizeUploadedDate(text),
+    dueDate: normalizeUploadedDate(text),
     customerSupplied,
     comments: obsolete ? OBSOLETE_COMMENT : "",
   };
@@ -8648,7 +7701,7 @@ async function parseShortageFile(file: File): Promise<ShortageItem[]> {
             ...previous,
             customerSupplied:
               previous.customerSupplied || due.customerSupplied,
-            dueDate: due.customerSupplied ? "" : previous.dueDate,
+            dueDate: due.dueDate || previous.dueDate,
             comments: due.comments || previous.comments,
           };
           return;
@@ -9139,7 +8192,7 @@ function OldDataImportModal({
           >
             <Upload size={16} /> {rows.length ? "Replace upload" : "Upload photo or Excel"}
           </button>
-          <input
+          <BufferedInput
             ref={uploadRef}
             type="file"
             hidden
@@ -9164,7 +8217,7 @@ function OldDataImportModal({
                 Job# entries beginning with 5 are held until last.
               </small>
             </div>
-            <textarea
+            <BufferedTextarea
               aria-label="Paste Excel table for OLD DATA Production Booking"
               value={oldDataPaste}
               onChange={(event) => setOldDataPaste(event.target.value)}
@@ -9264,7 +8317,7 @@ function OldDataImportModal({
                   </legend>
                   {(["Commercial", "Aerospace"] as Division[]).map((division) => (
                     <label key={division} className={current.division === division ? "selected" : ""}>
-                      <input
+                      <BufferedInput
                         type="radio"
                         checked={current.division === division}
                         onChange={() => updateCurrentDivision(division)}
@@ -9290,7 +8343,7 @@ function OldDataImportModal({
                         }
                         key={level}
                       >
-                        <input
+                        <BufferedInput
                           type="radio"
                           checked={current.buildLevel === level}
                           onChange={() =>
@@ -9310,7 +8363,7 @@ function OldDataImportModal({
                   </div>
                   <label>
                     Assign Project Family <span>(optional)</span>
-                    <input
+                    <BufferedInput
                       list="old-data-family-options"
                       value={current.familyName}
                       onChange={(event) =>
@@ -9342,7 +8395,7 @@ function OldDataImportModal({
                         <div>
                           {eligibleLinkedJobs.map((job) => (
                             <label key={job.id}>
-                              <input
+                              <BufferedInput
                                 type="checkbox"
                                 checked={current.linkedJobIds.includes(job.id)}
                                 onChange={(event) =>
@@ -9381,7 +8434,7 @@ function OldDataImportModal({
                 <div className="job-form-grid legacy-job-grid">
                   <label className={`wide ${fieldClass("customer")}`}>
                     Customer Sub-Category / Folder {missingMark("customer")}
-                    <input
+                    <BufferedInput
                       disabled={current.booked}
                       list="old-data-customer-options"
                       value={current.fields.customer}
@@ -9396,27 +8449,27 @@ function OldDataImportModal({
                   </label>
                   <label className={fieldClass("jobNumber")}>
                     Job # {missingMark("jobNumber")}
-                    <input disabled={current.booked} value={current.fields.jobNumber} onChange={(event) => updateCurrentField("jobNumber", event.target.value)} />
+                    <BufferedInput disabled={current.booked} value={current.fields.jobNumber} onChange={(event) => updateCurrentField("jobNumber", event.target.value)} />
                   </label>
                   <label className={fieldClass("ksid")}>
                     KSID {missingMark("ksid")}
-                    <input disabled={current.booked} value={current.fields.ksid} onChange={(event) => updateCurrentField("ksid", event.target.value)} onBlur={applyCurrentKsid} />
+                    <BufferedInput disabled={current.booked} value={current.fields.ksid} onChange={(event) => updateCurrentField("ksid", event.target.value)} onBlur={applyCurrentKsid} />
                   </label>
                   <label className={fieldClass("pnName")}>
                     PN Name {missingMark("pnName")}
-                    <input disabled={current.booked} value={current.fields.pnName} onChange={(event) => updateCurrentField("pnName", event.target.value)} />
+                    <BufferedInput disabled={current.booked} value={current.fields.pnName} onChange={(event) => updateCurrentField("pnName", event.target.value)} />
                   </label>
                   <label className={fieldClass("pn")}>
                     PN {missingMark("pn")}
-                    <input disabled={current.booked} value={current.fields.pn} onChange={(event) => updateCurrentField("pn", event.target.value)} />
+                    <BufferedInput disabled={current.booked} value={current.fields.pn} onChange={(event) => updateCurrentField("pn", event.target.value)} />
                   </label>
                   <label className={fieldClass("rev")}>
                     Rev {missingMark("rev")}
-                    <input disabled={current.booked} value={current.fields.rev} onChange={(event) => updateCurrentField("rev", event.target.value)} />
+                    <BufferedInput disabled={current.booked} value={current.fields.rev} onChange={(event) => updateCurrentField("rev", event.target.value)} />
                   </label>
                   <label className={fieldClass("quantity")}>
                     QTY {missingMark("quantity")}
-                    <input disabled={current.booked} inputMode="numeric" value={current.fields.quantity} onChange={(event) => updateCurrentField("quantity", event.target.value)} />
+                    <BufferedInput disabled={current.booked} inputMode="numeric" value={current.fields.quantity} onChange={(event) => updateCurrentField("quantity", event.target.value)} />
                   </label>
                   <label className={fieldClass("projectType")}>
                     Project Type {missingMark("projectType")}
@@ -9427,19 +8480,19 @@ function OldDataImportModal({
                   </label>
                   <label className={fieldClass("contact")}>
                     Contact {missingMark("contact")}
-                    <input disabled={current.booked} value={current.fields.contact} onChange={(event) => updateCurrentField("contact", event.target.value)} />
+                    <BufferedInput disabled={current.booked} value={current.fields.contact} onChange={(event) => updateCurrentField("contact", event.target.value)} />
                   </label>
                   <label>
                     Customer Due Date
-                    <input disabled={current.booked} type="date" value={current.fields.customerDueDate} onChange={(event) => updateCurrentField("customerDueDate", event.target.value)} />
+                    <BufferedInput disabled={current.booked} type="date" value={current.fields.customerDueDate} onChange={(event) => updateCurrentField("customerDueDate", event.target.value)} />
                   </label>
                   <label>
                     PO# <span>(optional)</span>
-                    <input disabled={current.booked} value={current.fields.poNumber} onChange={(event) => updateCurrentField("poNumber", event.target.value)} />
+                    <BufferedInput disabled={current.booked} value={current.fields.poNumber} onChange={(event) => updateCurrentField("poNumber", event.target.value)} />
                   </label>
                   <label>
                     Quote# <span>(optional)</span>
-                    <input disabled={current.booked} value={current.fields.quoteNumber} onChange={(event) => updateCurrentField("quoteNumber", event.target.value)} />
+                    <BufferedInput disabled={current.booked} value={current.fields.quoteNumber} onChange={(event) => updateCurrentField("quoteNumber", event.target.value)} />
                   </label>
                   <label className={fieldClass("status")}>
                     Status {missingMark("status")}
@@ -9450,23 +8503,23 @@ function OldDataImportModal({
                   </label>
                   <label className={fieldClass("createdDate")}>
                     Project Creation Date {missingMark("createdDate")}
-                    <input disabled={current.booked} type="date" value={current.fields.createdDate} onChange={(event) => updateCurrentField("createdDate", event.target.value)} />
+                    <BufferedInput disabled={current.booked} type="date" value={current.fields.createdDate} onChange={(event) => updateCurrentField("createdDate", event.target.value)} />
                   </label>
                   <label className={fieldClass("fabricationTurnDays")}>
                     Fabrication Turn Time {missingMark("fabricationTurnDays")}
-                    <input disabled={current.booked} type="number" min="0" value={current.fields.fabricationTurnDays} onChange={(event) => updateCurrentField("fabricationTurnDays", event.target.value)} />
+                    <BufferedInput disabled={current.booked} type="number" min="0" value={current.fields.fabricationTurnDays} onChange={(event) => updateCurrentField("fabricationTurnDays", event.target.value)} />
                   </label>
                   <label className={fieldClass("assemblyTurnDays")}>
                     Assembly Turn Time {missingMark("assemblyTurnDays")}
-                    <input disabled={current.booked} type="number" min="0" value={current.fields.assemblyTurnDays} onChange={(event) => updateCurrentField("assemblyTurnDays", event.target.value)} />
+                    <BufferedInput disabled={current.booked} type="number" min="0" value={current.fields.assemblyTurnDays} onChange={(event) => updateCurrentField("assemblyTurnDays", event.target.value)} />
                   </label>
                   <label className={fieldClass("smtDays")}>
                     SMT Turn Time {missingMark("smtDays")}
-                    <input disabled={current.booked} type="number" min="1" value={current.fields.smtDays} onChange={(event) => updateCurrentField("smtDays", event.target.value)} />
+                    <BufferedInput disabled={current.booked} type="number" min="1" value={current.fields.smtDays} onChange={(event) => updateCurrentField("smtDays", event.target.value)} />
                   </label>
                   <label className="wide">
                     Initial Note <span>(optional)</span>
-                    <input disabled={current.booked} value={current.fields.initialNote} onChange={(event) => updateCurrentField("initialNote", event.target.value)} />
+                    <BufferedInput disabled={current.booked} value={current.fields.initialNote} onChange={(event) => updateCurrentField("initialNote", event.target.value)} />
                   </label>
                 </div>
               </div>
@@ -10641,7 +9694,7 @@ function NewJobModal({
           >
             <Upload size={16} /> Upload Excel or screenshot
           </button>
-          <input
+          <BufferedInput
             ref={uploadRef}
             type="file"
             hidden
@@ -10665,7 +9718,7 @@ function NewJobModal({
                 here. The first data row fills this project entry.
               </small>
             </div>
-            <textarea
+            <BufferedTextarea
               aria-label="Paste Excel table for New Project"
               value={projectPaste}
               onChange={(event) => setProjectPaste(event.target.value)}
@@ -10860,7 +9913,7 @@ function NewJobModal({
           </legend>
           {(["Commercial", "Aerospace"] as Division[]).map((item) => (
             <label key={item} className={division === item ? "selected" : ""}>
-              <input
+              <BufferedInput
                 type="radio"
                 checked={division === item && !divisionMissing}
                 onChange={() => {
@@ -10880,7 +9933,7 @@ function NewJobModal({
         </fieldset>
         <section className="mechanical-job-choice">
           <label className="mechanical-assembly-toggle">
-            <input
+            <BufferedInput
               type="checkbox"
               checked={mechanicalBuild}
               onChange={(event) => {
@@ -10902,7 +9955,7 @@ function NewJobModal({
                 <legend>Mechanical build level</legend>
                 {(["CCA", "LRU"] as const).map((level) => (
                   <label className={mechanicalLevel === level ? "selected" : ""} key={level}>
-                    <input
+                    <BufferedInput
                       type="radio"
                       checked={mechanicalLevel === level}
                       onChange={() => {
@@ -10924,7 +9977,7 @@ function NewJobModal({
                 {fields.customer.trim() && !eligibleLinkedJobs.length && <em>No eligible jobs are currently saved in this folder.</em>}
                 {eligibleLinkedJobs.map((job) => (
                   <label key={job.id}>
-                    <input
+                    <BufferedInput
                       type="checkbox"
                       checked={linkedJobIds.includes(job.id)}
                       onChange={(event) => setLinkedJobIds((current) => event.target.checked ? [...current, job.id] : current.filter((id) => id !== job.id))}
@@ -10940,7 +9993,7 @@ function NewJobModal({
         <div className="job-form-grid">
           <label className={`wide ${fieldClass("customer")}`}>
             Customer Sub-Category / Folder {missingMark("customer")}
-            <input
+            <BufferedInput
               list={`customer-folder-options-${division.toLowerCase()}`}
               value={fields.customer}
               onChange={(event) => setField("customer", event.target.value)}
@@ -10954,14 +10007,14 @@ function NewJobModal({
           </label>
           <label className={fieldClass("jobNumber")}>
             {mechanicalBuild ? "MECH JOB #" : "Job #"} {missingMark("jobNumber")}
-            <input
+            <BufferedInput
               value={fields.jobNumber}
               onChange={(event) => setField("jobNumber", event.target.value)}
             />
           </label>
           <label className={fieldClass("ksid")}>
             KSID {missingMark("ksid")}
-            <input
+            <BufferedInput
               value={fields.ksid}
               onChange={(event) => setField("ksid", event.target.value)}
               onBlur={() => updatePrimaryKsid(fields.ksid)}
@@ -10969,14 +10022,14 @@ function NewJobModal({
           </label>
           <label className={`wide ${fieldClass("pnName")}`}>
             {mechanicalBuild ? `${mechanicalLevel} PN Name` : "PN Name"} {missingMark("pnName")}
-            <input
+            <BufferedInput
               value={fields.pnName}
               onChange={(event) => setField("pnName", event.target.value)}
             />
           </label>
           <label className={fieldClass("pn")}>
             {mechanicalBuild ? `${mechanicalLevel} PN` : "PN"} {missingMark("pn")}
-            <input
+            <BufferedInput
               value={fields.pn}
               onChange={(event) => setField("pn", event.target.value)}
               placeholder="Part number"
@@ -10984,14 +10037,14 @@ function NewJobModal({
           </label>
           <label className={fieldClass("rev")}>
             {mechanicalBuild ? `${mechanicalLevel} REV` : "Rev"} {missingMark("rev")}
-            <input
+            <BufferedInput
               value={fields.rev}
               onChange={(event) => setField("rev", event.target.value)}
             />
           </label>
           <label className={fieldClass("quantity")}>
             QTY {missingMark("quantity")}
-            <input
+            <BufferedInput
               inputMode="numeric"
               value={fields.quantity}
               onChange={(event) => setField("quantity", event.target.value)}
@@ -11013,14 +10066,14 @@ function NewJobModal({
           </label>
           <label className={fieldClass("contact")}>
             Contact {missingMark("contact")}
-            <input
+            <BufferedInput
               value={fields.contact}
               onChange={(event) => setField("contact", event.target.value)}
             />
           </label>
           <label>
             Customer Due Date <span>(optional)</span>
-            <input
+            <BufferedInput
               type="date"
               value={fields.customerDueDate}
               onChange={(event) =>
@@ -11030,14 +10083,14 @@ function NewJobModal({
           </label>
           <label>
             PO# <span>(optional)</span>
-            <input
+            <BufferedInput
               value={fields.poNumber}
               onChange={(event) => setField("poNumber", event.target.value)}
             />
           </label>
           <label>
             Quote# <span>(optional)</span>
-            <input
+            <BufferedInput
               value={fields.quoteNumber}
               onChange={(event) => setField("quoteNumber", event.target.value)}
             />
@@ -11058,7 +10111,7 @@ function NewJobModal({
           </label>
           <label className={fieldClass("createdDate")}>
             Project Creation Date {missingMark("createdDate")}
-            <input
+            <BufferedInput
               type="date"
               value={fields.createdDate}
               onChange={(event) => setField("createdDate", event.target.value)}
@@ -11076,7 +10129,7 @@ function NewJobModal({
           <div className="turn-time-grid">
             <label className={`pcba-turn ${fieldClass("fabricationTurnDays")}`}>
               Fabrication Turn Time {missingMark("fabricationTurnDays")}
-              <input
+              <BufferedInput
                 type="number"
                 min="0"
                 value={fields.fabricationTurnDays}
@@ -11088,7 +10141,7 @@ function NewJobModal({
             </label>
             <label className={fieldClass("assemblyTurnDays")}>
               {mechanicalBuild ? "Mechanical Assembly Turn Time" : "Assembly Turn Time"} {missingMark("assemblyTurnDays")}
-              <input
+              <BufferedInput
                 type="number"
                 min="0"
                 value={fields.assemblyTurnDays}
@@ -11100,7 +10153,7 @@ function NewJobModal({
             </label>
             <label className={`pcba-turn ${fieldClass("smtDays")}`}>
               SMT Turn Time {missingMark("smtDays")}
-              <input
+              <BufferedInput
                 type="number"
                 min="1"
                 value={fields.smtDays}
@@ -11113,7 +10166,7 @@ function NewJobModal({
         <fieldset className="process-picker">
           <legend>Special Processes</legend>
           <label>
-            <input
+            <BufferedInput
               type="checkbox"
               checked={polymerics}
               onChange={(event) => {
@@ -11129,7 +10182,7 @@ function NewJobModal({
             Polymerics
           </label>
           <label>
-            <input
+            <BufferedInput
               type="checkbox"
               checked={externalTesting}
               onChange={(event) => {
@@ -11145,7 +10198,7 @@ function NewJobModal({
             External Testing
           </label>
           <label>
-            <input
+            <BufferedInput
               type="checkbox"
               checked={faiReport}
               onChange={(event) => setFaiReport(event.target.checked)}
@@ -11153,7 +10206,7 @@ function NewJobModal({
             FAI Report
           </label>
           <label>
-            <input
+            <BufferedInput
               type="checkbox"
               checked={otherProcess}
               onChange={(event) => {
@@ -11175,7 +10228,7 @@ function NewJobModal({
                 <span>Polymerics options</span>
                 {polymericsOptions.map((item) => (
                   <label key={item}>
-                    <input
+                    <BufferedInput
                       type="checkbox"
                       checked={selectedPoly.includes(item)}
                       onChange={(event) =>
@@ -11192,7 +10245,7 @@ function NewJobModal({
               </div>
               <label className={fieldClass("polymericsTurnDays")}>
                 Polymerics Turn Time {missingMark("polymericsTurnDays")}
-                <input
+                <BufferedInput
                   type="number"
                   min="0"
                   value={fields.polymericsTurnDays}
@@ -11210,7 +10263,7 @@ function NewJobModal({
               <label className={fieldClass("externalTestingTurnDays")}>
                 External Testing Turn Time{" "}
                 {missingMark("externalTestingTurnDays")}
-                <input
+                <BufferedInput
                   type="number"
                   min="0"
                   value={fields.externalTestingTurnDays}
@@ -11227,7 +10280,7 @@ function NewJobModal({
               <label className={fieldClass("otherSpecialProcess")}>
                 Describe the other special process
                 {missingMark("otherSpecialProcess")}
-                <input
+                <BufferedInput
                   value={fields.otherSpecialProcess}
                   onChange={(event) =>
                     setField("otherSpecialProcess", event.target.value)
@@ -11237,7 +10290,7 @@ function NewJobModal({
               </label>
               <label className={fieldClass("otherSpecialProcessTurnDays")}>
                 Other Turn Time {missingMark("otherSpecialProcessTurnDays")}
-                <input
+                <BufferedInput
                   type="number"
                   min="0"
                   value={fields.otherSpecialProcessTurnDays}
@@ -11303,7 +10356,7 @@ function NewJobModal({
             />
           ))}
           <label className="mechanical-assembly-toggle">
-            <input
+            <BufferedInput
               type="checkbox"
               checked={includeMechanicalAssembly}
               onChange={(event) => {
@@ -11352,7 +10405,7 @@ function NewJobModal({
                 />
               ))}
               <label className="mechanical-assembly-toggle lru-toggle">
-                <input
+                <BufferedInput
                   type="checkbox"
                   checked={includeLru}
                   onChange={(event) => {
@@ -11388,7 +10441,7 @@ function NewJobModal({
         </section>
         <label className="initial-note">
           Initial dated note <span>(optional)</span>
-          <textarea
+          <BufferedTextarea
             rows={3}
             value={fields.initialNote}
             onChange={(event) => setField("initialNote", event.target.value)}
@@ -11499,7 +10552,7 @@ function LinkedBuildDraftCard({
       <div className="job-form-grid linked-job-grid">
         <label className={`wide ${required("customer")}`}>
           Customer Sub-Category / Folder
-          <input
+          <BufferedInput
             list={customerListId}
             value={draft.fields.customer}
             onChange={(event) => set("customer", event.target.value)}
@@ -11513,11 +10566,11 @@ function LinkedBuildDraftCard({
         </label>
         <label className={required("jobNumber")}>
           Job #
-          <input value={draft.fields.jobNumber} onChange={(event) => set("jobNumber", event.target.value)} />
+          <BufferedInput value={draft.fields.jobNumber} onChange={(event) => set("jobNumber", event.target.value)} />
         </label>
         <label className={required("ksid")}>
           KSID
-          <input
+          <BufferedInput
             value={draft.fields.ksid}
             onChange={(event) => onKsid(event.target.value)}
             onBlur={onKsidBlur}
@@ -11525,19 +10578,19 @@ function LinkedBuildDraftCard({
         </label>
         <label className={`wide ${required("pnName")}`}>
           PN Name
-          <input value={draft.fields.pnName} onChange={(event) => set("pnName", event.target.value)} />
+          <BufferedInput value={draft.fields.pnName} onChange={(event) => set("pnName", event.target.value)} />
         </label>
         <label className={required("pn")}>
           PN#
-          <input value={draft.fields.pn} onChange={(event) => set("pn", event.target.value)} />
+          <BufferedInput value={draft.fields.pn} onChange={(event) => set("pn", event.target.value)} />
         </label>
         <label className={required("rev")}>
           Rev
-          <input value={draft.fields.rev} onChange={(event) => set("rev", event.target.value)} />
+          <BufferedInput value={draft.fields.rev} onChange={(event) => set("rev", event.target.value)} />
         </label>
         <label className={required("quantity")}>
           QTY
-          <input inputMode="numeric" value={draft.fields.quantity} onChange={(event) => set("quantity", event.target.value)} />
+          <BufferedInput inputMode="numeric" value={draft.fields.quantity} onChange={(event) => set("quantity", event.target.value)} />
         </label>
         <label>
           Project Type
@@ -11547,43 +10600,43 @@ function LinkedBuildDraftCard({
         </label>
         <label className={required("contact")}>
           Contact
-          <input value={draft.fields.contact} onChange={(event) => set("contact", event.target.value)} />
+          <BufferedInput value={draft.fields.contact} onChange={(event) => set("contact", event.target.value)} />
         </label>
         <label>
           Customer Due Date <span>(optional)</span>
-          <input type="date" value={draft.fields.customerDueDate} onChange={(event) => set("customerDueDate", event.target.value)} />
+          <BufferedInput type="date" value={draft.fields.customerDueDate} onChange={(event) => set("customerDueDate", event.target.value)} />
         </label>
         <label>
           PO# <span>(inherited, editable)</span>
-          <input value={draft.fields.poNumber} onChange={(event) => set("poNumber", event.target.value)} />
+          <BufferedInput value={draft.fields.poNumber} onChange={(event) => set("poNumber", event.target.value)} />
         </label>
         <label>
           Quote# <span>(inherited, editable)</span>
-          <input value={draft.fields.quoteNumber} onChange={(event) => set("quoteNumber", event.target.value)} />
+          <BufferedInput value={draft.fields.quoteNumber} onChange={(event) => set("quoteNumber", event.target.value)} />
         </label>
         <label className={required("createdDate")}>
           Project Creation Date
-          <input type="date" value={draft.fields.createdDate} onChange={(event) => set("createdDate", event.target.value)} />
+          <BufferedInput type="date" value={draft.fields.createdDate} onChange={(event) => set("createdDate", event.target.value)} />
         </label>
         <label className={required("assemblyTurnDays")}>
           {draft.level === "PCBA" ? "Assembly Turn Time" : "Mechanical Assembly Turn Time"}
-          <input type="number" min="0" value={draft.fields.assemblyTurnDays} onChange={(event) => set("assemblyTurnDays", event.target.value)} />
+          <BufferedInput type="number" min="0" value={draft.fields.assemblyTurnDays} onChange={(event) => set("assemblyTurnDays", event.target.value)} />
         </label>
         {draft.level === "PCBA" && (
           <>
             <label>
               Fabrication Turn Time
-              <input type="number" min="0" value={draft.fields.fabricationTurnDays} onChange={(event) => set("fabricationTurnDays", event.target.value)} />
+              <BufferedInput type="number" min="0" value={draft.fields.fabricationTurnDays} onChange={(event) => set("fabricationTurnDays", event.target.value)} />
             </label>
             <label>
               SMT Turn Time
-              <input type="number" min="1" value={draft.fields.smtDays} onChange={(event) => set("smtDays", event.target.value)} />
+              <BufferedInput type="number" min="1" value={draft.fields.smtDays} onChange={(event) => set("smtDays", event.target.value)} />
             </label>
           </>
         )}
         <label className="wide">
           Initial Note <span>(optional)</span>
-          <input value={draft.fields.initialNote} onChange={(event) => set("initialNote", event.target.value)} />
+          <BufferedInput value={draft.fields.initialNote} onChange={(event) => set("initialNote", event.target.value)} />
         </label>
       </div>
     </article>
@@ -11622,7 +10675,7 @@ function JobDrawer({
   const [completedQuantityDraft, setCompletedQuantityDraft] = useState(String(job.completedQuantity ?? 0));
   const [shortageScanState, setShortageScanState] = useState("");
   const shortageUploadRef = useRef<HTMLInputElement>(null);
-  const shortageDue = addBusinessDays(job.createdDate, 3);
+  const shortageDue = addBusinessDays(job.createdDate, 2);
   const buildLevel = jobBuildLevel(job);
   const familyJobs = [
     job,
@@ -11740,7 +10793,7 @@ function JobDrawer({
         (job.shortages.length > 0 &&
           job.shortages.every((item) => item.complete))
           ? `Completed${job.allPartsReceivedDate ? ` ${dateLabel(job.allPartsReceivedDate)}` : ""}`
-          : "3 business days from project creation",
+          : "2 business days from project creation",
       done:
         job.workflowCompleted.includes("shortage-list") ||
         job.noShortageList ||
@@ -12328,7 +11381,7 @@ function JobDrawer({
             {editingDetails && (
               <label className="header-dock-date-field">
                 Krypton Dock Date
-                <input
+                <BufferedInput
                   type="date"
                   value={job.kryptonDockDateOverride || computedKryptonDockDate}
                   onChange={(event) =>
@@ -12387,7 +11440,7 @@ function JobDrawer({
               </label>
               <label>
                 Customer Folder
-                <input
+                <BufferedInput
                   value={job.customer}
                   onChange={(event) =>
                     onUpdate({ customer: event.target.value })
@@ -12396,7 +11449,7 @@ function JobDrawer({
               </label>
               <label>
                 Job #
-                <input
+                <BufferedInput
                   value={job.jobNumber}
                   onChange={(event) =>
                     onUpdate({ jobNumber: event.target.value })
@@ -12405,35 +11458,35 @@ function JobDrawer({
               </label>
               <label>
                 KSID
-                <input
+                <BufferedInput
                   value={job.ksid}
                   onChange={(event) => onUpdate({ ksid: event.target.value })}
                 />
               </label>
               <label>
                 PN Name
-                <input
+                <BufferedInput
                   value={job.pnName}
                   onChange={(event) => onUpdate({ pnName: event.target.value })}
                 />
               </label>
               <label>
                 PN
-                <input
+                <BufferedInput
                   value={job.pn}
                   onChange={(event) => onUpdate({ pn: event.target.value })}
                 />
               </label>
               <label>
                 Revision
-                <input
+                <BufferedInput
                   value={job.rev}
                   onChange={(event) => onUpdate({ rev: event.target.value })}
                 />
               </label>
               <label>
                 QTY
-                <input
+                <BufferedInput
                   inputMode="numeric"
                   value={job.quantity}
                   onChange={(event) => onUpdate({ quantity: event.target.value })}
@@ -12454,7 +11507,7 @@ function JobDrawer({
               </label>
               <label>
                 Contact
-                <input
+                <BufferedInput
                   value={job.contact}
                   onChange={(event) =>
                     onUpdate({ contact: event.target.value })
@@ -12463,7 +11516,7 @@ function JobDrawer({
               </label>
               <label>
                 PO#
-                <input
+                <BufferedInput
                   value={job.poNumber}
                   onChange={(event) =>
                     onUpdate({ poNumber: event.target.value })
@@ -12472,7 +11525,7 @@ function JobDrawer({
               </label>
               <label>
                 Quote#
-                <input
+                <BufferedInput
                   value={job.quoteNumber}
                   onChange={(event) =>
                     onUpdate({ quoteNumber: event.target.value })
@@ -12481,7 +11534,7 @@ function JobDrawer({
               </label>
               <label>
                 Customer Due Date
-                <input
+                <BufferedInput
                   type="date"
                   value={job.customerDueDate}
                   onChange={(event) =>
@@ -12667,7 +11720,7 @@ function JobDrawer({
                   <div><small>Total QTY</small><strong>{job.quantity || "0"}</strong></div>
                   <div className="completed-quantity-card">
                     <small>Completed QTY</small>
-                    <input
+                    <BufferedInput
                       aria-label="Edit completed quantity"
                       className={completedQuantityDraft === "" ? "missing-input" : ""}
                       type="text"
@@ -12683,8 +11736,8 @@ function JobDrawer({
                   <div><small>Remaining QTY</small><strong>{remainingQuantity}</strong></div>
                 </div>
                 <form className="completed-quantity-options" onSubmit={submitQuantityRelease}>
-                  <label>Completed QTY to release<input className={!releaseQuantity ? "missing-input" : ""} type="text" inputMode="numeric" value={releaseQuantity} onChange={(event) => setReleaseQuantity(event.target.value.replace(/[^0-9]/g, ""))} placeholder="Enter QTY" /></label>
-                  <label>Release date<input type="date" value={releaseDate} onChange={(event) => setReleaseDate(event.target.value)} /></label>
+                  <label>Completed QTY to release<BufferedInput className={!releaseQuantity ? "missing-input" : ""} type="text" inputMode="numeric" value={releaseQuantity} onChange={(event) => setReleaseQuantity(event.target.value.replace(/[^0-9]/g, ""))} placeholder="Enter QTY" /></label>
+                  <label>Release date<BufferedInput type="date" value={releaseDate} onChange={(event) => setReleaseDate(event.target.value)} /></label>
                   <button className="button primary small" type="submit" disabled={remainingQuantity === 0}>Submit release</button>
                 </form>
                 {(job.quantityReleases ?? []).length > 0 && (
@@ -12710,7 +11763,7 @@ function JobDrawer({
                       </div>
                       <label>
                         QTY needed for 1 {buildLevel}
-                        <input
+                        <BufferedInput
                           className={item.requirement.quantityPerAssembly === "" ? "missing-input" : ""}
                           type="text"
                           inputMode="numeric"
@@ -12792,11 +11845,11 @@ function JobDrawer({
                     return (
                       <div className={`mechanical-shipment-row ${possible ? "possible" : "not-possible"}`} key={batch.id}>
                         <div className="shipment-heading"><strong>Shipment {index + 1}</strong><button type="button" className="shipment-remove" onClick={() => removeMechanicalShipment(batch.id)} aria-label={`Remove shipment ${index + 1}`}><Trash2 size={16} /> Remove</button></div>
-                        <label>QTY<input className={batch.quantity === "" ? "missing-input" : ""} type="text" inputMode="numeric" value={batch.quantity} onChange={(event) => updateMechanicalShipment(batch.id, { quantity: event.target.value === "" ? "" : Math.max(1, Number(event.target.value) || 1) })} /></label>
-                        <label>MECH Turn Time<input type="text" inputMode="numeric" value={batch.mechanicalTurnDays} onChange={(event) => updateMechanicalShipment(batch.id, { mechanicalTurnDays: Math.max(0, Number(event.target.value.replace(/[^0-9]/g, "")) || 0) })} /></label>
-                        <label>Calculate Dock Date<input type="date" value={shipmentDates[index] ?? ""} onChange={(event) => updateMechanicalShipment(batch.id, { dockDateOverride: event.target.value })} /></label>
-                        <label className="shipment-tracking">Tracking information<input value={batch.trackingInformation} onChange={(event) => updateMechanicalShipment(batch.id, { trackingInformation: event.target.value })} /></label>
-                        <label className="shipment-complete"><input type="checkbox" checked={batch.completed} onChange={(event) => updateMechanicalShipment(batch.id, { completed: event.target.checked })} /> Completed Shipment</label>
+                        <label>QTY<BufferedInput className={batch.quantity === "" ? "missing-input" : ""} type="text" inputMode="numeric" value={batch.quantity} onChange={(event) => updateMechanicalShipment(batch.id, { quantity: event.target.value === "" ? "" : Math.max(1, Number(event.target.value) || 1) })} /></label>
+                        <label>MECH Turn Time<BufferedInput type="text" inputMode="numeric" value={batch.mechanicalTurnDays} onChange={(event) => updateMechanicalShipment(batch.id, { mechanicalTurnDays: Math.max(0, Number(event.target.value.replace(/[^0-9]/g, "")) || 0) })} /></label>
+                        <label>Calculate Dock Date<BufferedInput type="date" value={shipmentDates[index] ?? ""} onChange={(event) => updateMechanicalShipment(batch.id, { dockDateOverride: event.target.value })} /></label>
+                        <label className="shipment-tracking">Tracking information<BufferedInput value={batch.trackingInformation} onChange={(event) => updateMechanicalShipment(batch.id, { trackingInformation: event.target.value })} /></label>
+                        <label className="shipment-complete"><BufferedInput type="checkbox" checked={batch.completed} onChange={(event) => updateMechanicalShipment(batch.id, { completed: event.target.checked })} /> Completed Shipment</label>
                       </div>
                     );
                   })}
@@ -12805,7 +11858,7 @@ function JobDrawer({
               </div>
             ) : null}
             {buildLevel === "PCBA" && linkedMechanicalJobs.length === 0 && <label className="accepted-partials-toggle">
-              <input
+              <BufferedInput
                 type="checkbox"
                 checked={job.acceptedPartials}
                 onChange={(event) =>
@@ -12827,7 +11880,7 @@ function JobDrawer({
                 <form className="partial-delivery-form" onSubmit={addPartialDelivery}>
                   <label>
                     QTY
-                    <input
+                    <BufferedInput
                       value={partialQty}
                       onChange={(event) => setPartialQty(event.target.value)}
                       placeholder="Quantity"
@@ -12836,7 +11889,7 @@ function JobDrawer({
                   </label>
                   <label>
                     Due Date
-                    <input
+                    <BufferedInput
                       type="date"
                       value={partialDueDate}
                       onChange={(event) => setPartialDueDate(event.target.value)}
@@ -12845,7 +11898,7 @@ function JobDrawer({
                   </label>
                   <label className="partial-comments">
                     Comments
-                    <input
+                    <BufferedInput
                       value={partialComments}
                       onChange={(event) => setPartialComments(event.target.value)}
                       placeholder="Customer approval or delivery details"
@@ -12861,7 +11914,7 @@ function JobDrawer({
                     <span>{dateLabel(partial.dueDate)}</span>
                     <span>{partial.comments || "No comments"}</span>
                     <label className="partial-complete-toggle">
-                      <input
+                      <BufferedInput
                         type="checkbox"
                         checked={partial.completed}
                         onChange={(event) => updatePartialCompletion(partial.id, event.target.checked)}
@@ -12924,7 +11977,7 @@ function JobDrawer({
                     <div className="krypton-dock-controls">
                       <label className="tracking-information-field">
                         Tracking Information
-                        <input
+                        <BufferedInput
                           value={job.trackingInformation ?? ""}
                           onChange={(event) => updateTrackingInformation(event.target.value)}
                           placeholder="Carrier, tracking number, or shipment details"
@@ -12938,7 +11991,7 @@ function JobDrawer({
             <div className="workflow-inputs">
               <label>
                 Project creation date
-                <input
+                <BufferedInput
                   type="date"
                   value={job.createdDate}
                   onChange={(event) => {
@@ -12952,7 +12005,7 @@ function JobDrawer({
               </label>
               <label>
                 Customer due date
-                <input
+                <BufferedInput
                   type="date"
                   value={job.customerDueDate}
                   onChange={(event) =>
@@ -12963,7 +12016,7 @@ function JobDrawer({
               {buildLevel === "PCBA" && (
                 <label>
                   Fabrication turn days
-                  <input
+                  <BufferedInput
                     type="number"
                     min="0"
                     value={job.fabricationTurnDays}
@@ -12981,7 +12034,7 @@ function JobDrawer({
               )}
               <label>
                 {buildLevel === "PCBA" ? "Assembly turn days" : "Mechanical assembly turn days"}
-                <input
+                <BufferedInput
                   type="number"
                   min="0"
                   value={job.assemblyTurnDays}
@@ -13026,7 +12079,7 @@ function JobDrawer({
               </div>
               <label className="pcb-dock-date">
                 PCB Dock Date
-                <input
+                <BufferedInput
                   type="date"
                   value={job.pcbDockDate}
                   onChange={(event) => {
@@ -13045,7 +12098,7 @@ function JobDrawer({
               </label>
               {job.pcbDockDate && (
                 <label className="pcb-arrival-toggle">
-                  <input
+                  <BufferedInput
                     type="checkbox"
                     checked={job.pcbArrived}
                     onChange={(event) => {
@@ -13104,7 +12157,7 @@ function JobDrawer({
               {["Polymerics", "External Testing", "FAI Report", "Other"].map(
                 (process) => (
                   <label key={process}>
-                    <input
+                    <BufferedInput
                       type="checkbox"
                       checked={job.specialProcesses.includes(process)}
                       onChange={(event) =>
@@ -13132,7 +12185,7 @@ function JobDrawer({
                 <span>Polymerics requirements</span>
                 {polymericsOptions.map((item) => (
                   <label key={item}>
-                    <input
+                    <BufferedInput
                       type="checkbox"
                       checked={job.polymericsOptions.includes(item)}
                       onChange={(event) =>
@@ -13147,7 +12200,7 @@ function JobDrawer({
             {job.specialProcesses.includes("Other") && (
               <label className="drawer-field other-process-input">
                 Other special process
-                <input
+                <BufferedInput
                   value={job.otherSpecialProcess}
                   onChange={(event) =>
                     onUpdate({ otherSpecialProcess: event.target.value })
@@ -13160,7 +12213,7 @@ function JobDrawer({
               {job.specialProcesses.includes("Polymerics") && (
                 <label>
                   Polymerics Turn Time
-                  <input
+                  <BufferedInput
                     type="number"
                     min="0"
                     value={job.polymericsTurnDays}
@@ -13180,7 +12233,7 @@ function JobDrawer({
               {job.specialProcesses.includes("External Testing") && (
                 <label>
                   External Testing Turn Time
-                  <input
+                  <BufferedInput
                     type="number"
                     min="0"
                     value={job.externalTestingTurnDays}
@@ -13200,7 +12253,7 @@ function JobDrawer({
               {job.specialProcesses.includes("Other") && (
                 <label>
                   Other Process Turn Time
-                  <input
+                  <BufferedInput
                     type="number"
                     min="0"
                     value={job.otherSpecialProcessTurnDays}
@@ -13237,7 +12290,7 @@ function JobDrawer({
               Shortage QTY, and Due Date. PCB and green received rows are
               skipped.
             </p>
-            <input
+            <BufferedInput
               ref={shortageUploadRef}
               type="file"
               accept=".xlsx,.xls,.csv,image/*"
@@ -13254,13 +12307,13 @@ function JobDrawer({
           <section className="drawer-section">
             <h3>Notes</h3>
             <form className="drawer-note-form" onSubmit={addNote}>
-              <input
+              <BufferedInput
                 type="date"
                 value={noteDate}
                 onChange={(event) => setNoteDate(event.target.value)}
                 required
               />
-              <textarea
+              <BufferedTextarea
                 rows={3}
                 value={noteText}
                 onChange={(event) => setNoteText(event.target.value)}
@@ -13330,7 +12383,7 @@ function JobDrawer({
                     <div className="note-copy">
                       {editingNoteId === note.id ? (
                         <>
-                          <textarea
+                          <BufferedTextarea
                             rows={3}
                             value={editingNoteText}
                             onChange={(event) =>
