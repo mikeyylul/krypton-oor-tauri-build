@@ -2926,7 +2926,7 @@ export default function Home() {
           <div>
             <p className="eyebrow">Krypton Solutions OOR</p>
             <h1>{title}</h1>
-            <p className="date-line">Version 74.1 · {dateLabel(chicagoDateKey())}</p>
+            <p className="date-line">Version 74.2 · {dateLabel(chicagoDateKey())}</p>
           </div>
           <div className="topbar-actions">
             {(activeView === "commercial" || activeView === "aerospace") && (
@@ -3065,7 +3065,13 @@ const shortageReportColumns = [
   "PN Name",
   "PN and Rev",
   "Issue KSP#",
+  "KS Purchasing Team Comments",
 ];
+
+function shortageReportDate(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  return match ? `${match[2]}/${match[3]}/${match[1]}` : "Not Set";
+}
 
 function downloadShortageListReport(jobs: Job[]) {
   const today = chicagoDateKey();
@@ -3085,9 +3091,10 @@ function downloadShortageListReport(jobs: Job[]) {
       [job.pn, job.rev ? `Rev ${job.rev}` : ""].filter(Boolean).join(" "),
       shortages.length
         ? shortages.map((item) =>
-            `• ${item.kspNumber || "KSP# pending"} | ${item.pnNumber || "PN# pending"} | ${item.dueDate || "Not Set"}`,
+            `• ${item.kspNumber || "KSP# pending"} | ${item.pnNumber || "PN# pending"} | ${shortageReportDate(item.dueDate)}`,
           ).join("\n")
         : note,
+      "",
     ];
   }
 
@@ -3099,7 +3106,7 @@ function downloadShortageListReport(jobs: Job[]) {
     const sheet = XLSX.utils.aoa_to_sheet(rows);
     sheet["!cols"] = [
       { wch: 26 }, { wch: 17 }, { wch: 17 },
-      { wch: 30 }, { wch: 30 }, { wch: 75 },
+      { wch: 30 }, { wch: 30 }, { wch: 75 }, { wch: 36 },
     ];
     // Keep multiple KSPs on one job row in a multiline Excel cell.
     for (let row = 1; row < rows.length; row += 1) {
@@ -3160,7 +3167,7 @@ function downloadShortageListReport(jobs: Job[]) {
   const needsSheet = XLSX.utils.aoa_to_sheet(needsRows);
   needsSheet["!cols"] = [
     { wch: 26 }, { wch: 17 }, { wch: 17 },
-    { wch: 30 }, { wch: 30 }, { wch: 75 },
+    { wch: 30 }, { wch: 30 }, { wch: 75 }, { wch: 36 },
   ];
   needsSheet["!autofilter"] = { ref: needsSheet["!ref"]! };
   needsSheet["!rows"] = needsRows.map(() => ({ hpt: 32 }));

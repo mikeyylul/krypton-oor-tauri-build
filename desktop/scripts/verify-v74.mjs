@@ -125,7 +125,7 @@ try {
   const file = await download.path();
   const workbook = XLSX.readFile(file);
   assert.deepEqual(workbook.SheetNames, ["Commercial", "Aerospace", "Customer Supplied", "Need Shortage Report"]);
-  const header = ["Customer Name", "Job #", "KSID", "PN Name", "PN and Rev", "Issue KSP#"];
+  const header = ["Customer Name", "Job #", "KSID", "PN Name", "PN and Rev", "Issue KSP#", "KS Purchasing Team Comments"];
   for (const name of workbook.SheetNames) assert.deepEqual(XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1 })[0], header);
   const report = JSON.stringify(workbook.Sheets);
   assert(report.includes("KSP-old")); assert(report.includes("KSP-customer"));
@@ -137,6 +137,12 @@ try {
   assert.equal(grouped.length, 1, "One row per job");
   assert.match(grouped[0][5], /KSP-today/);
   assert.match(grouped[0][5], /KSP-another/);
+  const expectedDate = (value) => {
+    const [year, month, date] = value.split("-");
+    return month + "/" + date + "/" + year;
+  };
+  assert(grouped[0][5].includes(expectedDate(day(0))), "Issued due dates use MM/DD/YYYY");
+  assert.equal(grouped[0][6] ?? "", "", "Purchasing comments column remains blank");
   assert(grouped[0][5].endsWith("Not Set"), "Undated bullet last");
   assert.equal(commercialRows.at(-1)[1], "91007", "Undated-only job sorted last");
   const archive = XLSX.CFB.read(fs.readFileSync(file), { type: "buffer" });
@@ -147,7 +153,7 @@ try {
   assert.equal(await head.locator("span").nth(3).textContent(), "PN Name");
   assert.equal(await head.locator("span").nth(4).innerText(), "PN");
   assert.deepEqual(errors, []);
-  console.log("PASS: 80 folder memberships survive reload; customer dates/copy; dock drivers; workflow completion; blur flush; four-sheet Excel filtering and wrap alignment; PN columns; quote removal.");
+  console.log("PASS: 80 folder memberships survive reload; customer dates/copy; dock drivers; workflow completion; blur flush; four-sheet Excel filtering, MM/DD/YYYY dates, blank purchasing comments, and wrap alignment; PN columns; quote removal.");
 } finally {
   await browser?.close();
   if (process.platform === "win32") spawn("taskkill", ["/pid", String(server.pid), "/T", "/F"]);
