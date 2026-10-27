@@ -187,7 +187,7 @@ try {
   assert(exportArchive.FullPaths.some((path) => path.endsWith("/xl/charts/chart1.xml")), "Completed Jobs chart exists");
   assert(exportArchive.FullPaths.some((path) => path.endsWith("/xl/drawings/drawing1.xml")), "Chart is attached to the worksheet");
 
-  await page.getByRole("button", { name: /^Settings/ }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
   const backupStarted = page.waitForEvent("download");
   await page.getByRole("button", { name: "Export complete backup", exact: true }).click();
   const backupDownload = await backupStarted;
