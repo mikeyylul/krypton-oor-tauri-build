@@ -193,11 +193,20 @@ function addCompletedJobsChart(
   );
 }
 
-function downloadWrappedWorkbook(
+function bytesToBase64(bytes: Uint8Array) {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return window.btoa(binary);
+}
+
+async function downloadWrappedWorkbook(
   workbook: XLSX.WorkBook,
   filename: string,
   options: { completedJobsChart?: boolean } = {},
-) {
+): Promise<boolean> {
   const cfb = (XLSX as any).CFB;
   const archive = cfb.read(new Uint8Array(XLSX.write(workbook, {
     type: "array", bookType: "xlsx", compression: false,
@@ -217,8 +226,16 @@ function downloadWrappedWorkbook(
     const completedIndex = workbook.SheetNames.indexOf("Completed Jobs");
     if (completedIndex >= 0) addCompletedJobsChart(archive, cfb, completedIndex + 1);
   }
-  const bytes = cfb.write(archive, { type: "buffer", fileType: "zip", compression: false });
-  const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], {
+  const bytes = new Uint8Array(cfb.write(archive, {
+    type: "buffer", fileType: "zip", compression: false,
+  }));
+  const nativeSave = desktopInvoke<string | null>("save_export_file", {
+    defaultName: filename,
+    contentsBase64: bytesToBase64(bytes),
+  });
+  if (nativeSave) return (await nativeSave) !== null;
+
+  const url = URL.createObjectURL(new Blob([bytes], {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   }));
   const link = document.createElement("a");
@@ -228,6 +245,7 @@ function downloadWrappedWorkbook(
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  return true;
 }
 
 type Division = "Commercial" | "Aerospace";
@@ -2602,7 +2620,7 @@ export default function Home() {
     window.history.replaceState(null, "", window.location.pathname);
   }
 
-  function exportJobs() {
+  async function exportJobs() {
     flushDeferredEdits();
     const workbook = XLSX.utils.book_new();
     const usedSheetNames = new Set<string>();
@@ -2771,18 +2789,18 @@ export default function Home() {
     };
 
     try {
-      downloadWrappedWorkbook(
+      const saved = await downloadWrappedWorkbook(
         workbook,
         `Krypton-Solutions-OOR-Jobs-${chicagoDateKey()}.xlsx`,
         { completedJobsChart: true },
       );
-      notify("Excel workbook downloaded.");
+      notify(saved ? "Excel workbook saved." : "Excel export canceled.");
     } catch {
-      notify("The Excel workbook could not be downloaded. Please try again.");
+      notify("The Excel workbook could not be saved. Please try again.");
     }
   }
 
-  function exportCompleteBackup() {
+  async function exportCompleteBackup() {
     flushDeferredEdits();
     const workbook = XLSX.utils.book_new();
     const backupRows = [
@@ -2842,13 +2860,13 @@ export default function Home() {
     summarySheet["!cols"] = [{ wch: 28 }, { wch: 100 }];
     XLSX.utils.book_append_sheet(workbook, summarySheet, "Read Me");
     try {
-      downloadWrappedWorkbook(
+      const saved = await downloadWrappedWorkbook(
         workbook,
         `Krypton-Solutions-OOR-Complete-Backup-${chicagoDateKey()}.xlsx`,
       );
-      notify("Complete Excel backup downloaded.");
+      notify(saved ? "Complete Excel backup saved." : "Backup export canceled.");
     } catch {
-      notify("The complete backup could not be downloaded. Please try again.");
+      notify("The complete backup could not be saved. Please try again.");
     }
   }
 
@@ -3206,7 +3224,7 @@ export default function Home() {
           <div>
             <p className="eyebrow">Krypton Solutions OOR</p>
             <h1>{title}</h1>
-            <p className="date-line">Version 76 · {dateLabel(chicagoDateKey())}</p>
+            <p className="date-line">Version 77 · {dateLabel(chicagoDateKey())}</p>
           </div>
           <div className="topbar-actions">
             {(activeView === "commercial" || activeView === "aerospace") && (

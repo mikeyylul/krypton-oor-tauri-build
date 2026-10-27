@@ -201,12 +201,37 @@ try {
   await page.getByLabel("Import complete Excel backup").setInputFiles(backupFile);
   await page.getByText(/Backup restored: 80 jobs/).waitFor();
 
+  await page.evaluate(() => {
+    window.__nativeExport = null;
+    window.__TAURI_INTERNALS__ = {
+      invoke: async (command, args) => {
+        if (command !== "save_export_file") return null;
+        window.__nativeExport = { command, args };
+        return `C:\\Users\\Test\\Downloads\\${args.defaultName}`;
+      },
+    };
+  });
+  await page.getByRole("button", { name: "Export complete backup", exact: true }).click();
+  await page.getByText("Complete Excel backup saved.").waitFor();
+  const nativeBackup = await page.evaluate(() => window.__nativeExport);
+  assert.equal(nativeBackup.command, "save_export_file");
+  assert.match(nativeBackup.args.defaultName, /^Krypton-Solutions-OOR-Complete-Backup-\d{4}-\d{2}-\d{2}\.xlsx$/);
+  assert(nativeBackup.args.contentsBase64.startsWith("UEs"), "Native save receives an XLSX ZIP payload");
+  const nativeWorkbook = XLSX.read(Buffer.from(nativeBackup.args.contentsBase64, "base64"));
+  assert.deepEqual(nativeWorkbook.SheetNames, ["Complete Backup", "Read Me"]);
+  assert.equal(
+    XLSX.utils.sheet_to_json(nativeWorkbook.Sheets["Complete Backup"])
+      .filter((row) => row["Record Type"] === "Job").length,
+    80,
+    "Native Windows save receives every job",
+  );
+
   await page.getByRole("button", { name: /List of Action Items/ }).click();
   const head = page.locator(".grouped-action-head").first();
   assert.equal(await head.locator("span").nth(3).textContent(), "PN Name");
   assert.equal(await head.locator("span").nth(4).innerText(), "PN");
   assert.deepEqual(errors, []);
-  console.log("PASS: Version 76 Weekly Report, organized Export Excel with formulas/chart, complete backup export/import, and all Version 70-75 regressions.");
+  console.log("PASS: Version 77 native Windows backup save, Version 76 reports, and all Version 70-75 regressions.");
 } finally {
   await browser?.close();
   if (process.platform === "win32") spawn("taskkill", ["/pid", String(server.pid), "/T", "/F"]);

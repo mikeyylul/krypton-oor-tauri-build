@@ -165,4 +165,10 @@ for (const fragment of [
 }
 if (desktopSource.includes('id: "quotes"') || desktopSource.includes("function QuotesView(")) throw new Error("Retired quote UI remains");
 if (!rustSource.includes("fn finish_close") || !rustSource.includes("krypton-before-close")) throw new Error("Native close must flush edits");
-console.log("Validated Version 76 source parity, workbook exports, and close-flush integration.");
+for (const fragment of ["fn save_export_file", "SaveFileDialog", "contents_base64", "save_export_file,"]) {
+  if (!rustSource.includes(fragment)) throw new Error("Missing native Windows export behavior: " + fragment);
+}
+if (!desktopSource.includes('desktopInvoke<string | null>("save_export_file"')) {
+  throw new Error("Excel exports must use the native Windows save command");
+}
+console.log("Validated Version 77 native Windows Excel save, source parity, workbook exports, and close-flush integration.");

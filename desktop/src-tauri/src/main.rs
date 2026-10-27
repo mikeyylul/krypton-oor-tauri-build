@@ -5,6 +5,7 @@ use std::{
     path::PathBuf,
     process::Command,
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use tauri::{
     utils::config::WebviewUrl,
     webview::{NewWindowResponse, WebviewWindowBuilder},
@@ -171,6 +172,74 @@ fn create_rfq_folder(
 }
 
 #[tauri::command]
+fn save_export_file(
+    default_name: String,
+    contents_base64: String,
+) -> Result<Option<String>, String> {
+    let file_name = PathBuf::from(default_name)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::to_string)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "Krypton-Solutions-OOR-Export.xlsx".to_string());
+    let file_name = if file_name.to_ascii_lowercase().ends_with(".xlsx") {
+        file_name
+    } else {
+        format!("{file_name}.xlsx")
+    };
+    let escaped_name = file_name.replace('\'', "''");
+    let script = format!(
+        "Add-Type -AssemblyName System.Windows.Forms; \
+         [Console]::OutputEncoding = [Text.Encoding]::UTF8; \
+         $dialog = New-Object System.Windows.Forms.SaveFileDialog; \
+         $dialog.Title = 'Save Krypton Excel export'; \
+         $dialog.FileName = '{escaped_name}'; \
+         $dialog.Filter = 'Excel Workbook (*.xlsx)|*.xlsx'; \
+         $dialog.DefaultExt = 'xlsx'; \
+         $dialog.AddExtension = $true; \
+         $dialog.OverwritePrompt = $true; \
+         $dialog.RestoreDirectory = $true; \
+         if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ \
+             [Console]::Out.Write($dialog.FileName) \
+         }}"
+    );
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-STA",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            &script,
+        ])
+        .output()
+        .map_err(|error| format!("The Windows save dialog could not be opened: {error}"))?;
+    if !output.status.success() {
+        let details = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if details.is_empty() {
+            "The Windows save dialog closed unexpectedly.".to_string()
+        } else {
+            format!("The Windows save dialog failed: {details}")
+        });
+    }
+    let selected_text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if selected_text.is_empty() {
+        return Ok(None);
+    }
+    let selected = PathBuf::from(selected_text);
+    let contents = STANDARD
+        .decode(contents_base64)
+        .map_err(|error| format!("The Excel export data was invalid: {error}"))?;
+    fs::write(&selected, contents).map_err(|error| {
+        format!(
+            "The Excel export could not be saved to {}: {error}",
+            selected.display()
+        )
+    })?;
+    Ok(Some(selected.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
 fn finish_close(window: tauri::WebviewWindow) -> Result<(), String> {
     window.destroy().map_err(|error| error.to_string())
 }
@@ -180,6 +249,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             select_rfq_customer_folder,
             create_rfq_folder,
+            save_export_file,
             finish_close
         ])
         .setup(|app| {
