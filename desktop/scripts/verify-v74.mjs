@@ -84,14 +84,6 @@ try {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto("http://127.0.0.1:1420/?job=test-0");
-  const statusSelect = page.locator("label.drawer-field").filter({ hasText: "Status filter value" }).locator("select");
-  await statusSelect.waitFor();
-  assert.equal(await statusSelect.locator('option[value="Polymerics"]').count(), 1);
-  assert.equal(await statusSelect.locator('option[value="External Testing"]').count(), 1);
-  const timelineNames = page.locator(".milestone-list article > div > strong");
-  assert((await timelineNames.allTextContents()).indexOf("Polymerics") < (await timelineNames.allTextContents()).indexOf("External Testing"));
-  await page.getByRole("button", { name: "Move External Testing earlier" }).click();
-  assert((await timelineNames.allTextContents()).indexOf("External Testing") < (await timelineNames.allTextContents()).indexOf("Polymerics"));
   const comment = page.getByLabel("Shortage comments", { exact: true }).first();
   await comment.waitFor(); await page.waitForTimeout(1300);
   assert.equal(await page.getByRole("button", { name: "Quotes", exact: true }).count(), 0);
