@@ -35,6 +35,12 @@ jobs[4].status = "Complete";
 jobs[6].shortages = [shortage("today", day(0)), shortage("another", day(-1)), shortage("mixed-undated", "")];
 jobs[7].shortages = [shortage("only-undated", "")];
 jobs[8].workflowCompleted = ["shortage-list"];
+jobs[9].shortages = [shortage("no-follow-up", day(-3))];
+jobs[9].excludeFromFollowUps = true;
+jobs[0].specialProcesses = ["Polymerics", "External Testing"];
+jobs[0].specialProcessOrder = ["Polymerics", "External Testing"];
+jobs[0].polymericsTurnDays = 2;
+jobs[0].externalTestingTurnDays = 3;
 const folder = { id: "test-folder", name: "Large organization", division: "Commercial",
   collapsed: false, customers: jobs.map((job) => job.customer.trim()) };
 const dockSource = source.slice(source.indexOf("function materialsReadyDate("), source.indexOf("function pcbaReadyForKitting(")).replace("job: Job", "job");
@@ -78,6 +84,13 @@ try {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto("http://127.0.0.1:1420/?job=test-0");
+  const statusSelect = page.locator("label.drawer-field").filter({ hasText: "Status filter value" }).locator("select");
+  assert.equal(await statusSelect.locator('option[value="Polymerics"]').count(), 1);
+  assert.equal(await statusSelect.locator('option[value="External Testing"]').count(), 1);
+  const timelineNames = page.locator(".milestone-list article > div > strong");
+  assert((await timelineNames.allTextContents()).indexOf("Polymerics") < (await timelineNames.allTextContents()).indexOf("External Testing"));
+  await page.getByRole("button", { name: "Move External Testing earlier" }).click();
+  assert((await timelineNames.allTextContents()).indexOf("External Testing") < (await timelineNames.allTextContents()).indexOf("Polymerics"));
   const comment = page.getByLabel("Shortage comments", { exact: true }).first();
   await comment.waitFor(); await page.waitForTimeout(1300);
   assert.equal(await page.getByRole("button", { name: "Quotes", exact: true }).count(), 0);
@@ -130,6 +143,7 @@ try {
   const report = JSON.stringify(workbook.Sheets);
   assert(report.includes("KSP-old")); assert(report.includes("KSP-customer"));
   assert(!report.includes("KSP-future")); assert(!report.includes("KSP-received")); assert(!report.includes("KSP-customer-future"));
+  assert(!report.includes("KSP-no-follow-up"), "No Follow Ups jobs are excluded from the shortage report");
   const need = JSON.stringify(workbook.Sheets["Need Shortage Report"]);
   assert(need.includes("91005")); assert(!need.includes("91003")); assert(!need.includes("91004")); assert(!need.includes("91008"));
   const commercialRows = XLSX.utils.sheet_to_json(workbook.Sheets.Commercial, { header: 1 }).slice(1);

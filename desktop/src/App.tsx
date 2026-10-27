@@ -321,6 +321,8 @@ type Job = {
   quantityReleases?: QuantityRelease[];
   mechanicalShipments?: MechanicalShipment[];
   specialProcesses: string[];
+  specialProcessOrder?: string[];
+  mechanicalAssemblyStartDate?: string;
   otherSpecialProcess: string;
   otherSpecialProcessTurnDays: number;
   polymericsOptions: PolymericsOption[];
@@ -777,6 +779,55 @@ function specialProcessTurnDays(job: Job) {
       ? job.otherSpecialProcessTurnDays
       : 0)
   );
+}
+
+function orderedSpecialProcesses(job: Job) {
+  const selected = job.specialProcesses ?? [];
+  const savedOrder = job.specialProcessOrder ?? [];
+  return [
+    ...savedOrder.filter((process) => selected.includes(process)),
+    ...selected.filter((process) => !savedOrder.includes(process)),
+  ];
+}
+
+function specialProcessLabel(job: Job, process: string) {
+  return process === "Other"
+    ? job.otherSpecialProcess.trim() || "Other Special Process"
+    : process;
+}
+
+function specialProcessMilestoneKey(process: string) {
+  return process === "Polymerics"
+    ? "polymerics"
+    : process === "External Testing"
+      ? "external-testing"
+      : process === "FAI Report"
+        ? "fai-report"
+        : "other-special-process";
+}
+
+function specialProcessDays(job: Job, process: string) {
+  if (process === "Polymerics") return job.polymericsTurnDays;
+  if (process === "External Testing") return job.externalTestingTurnDays;
+  if (process === "Other") return job.otherSpecialProcessTurnDays;
+  return 0;
+}
+
+function mechanicalKryptonDockDate(job: Job) {
+  if (!job.mechanicalAssemblyStartDate) return "";
+  const partialDockDate = activePartialDockDate(job);
+  if (partialDockDate) return partialDockDate;
+  if (job.kryptonDockDateOverride) return job.kryptonDockDateOverride;
+  return addBusinessDays(
+    job.mechanicalAssemblyStartDate,
+    job.assemblyTurnDays + specialProcessTurnDays(job),
+  );
+}
+
+function jobKryptonDockDate(job: Job) {
+  return jobBuildLevel(job) === "PCBA"
+    ? kryptonDockDate(job)
+    : mechanicalKryptonDockDate(job);
 }
 
 function materialsReadyDate(job: Job) {
@@ -1286,6 +1337,13 @@ function normalizeJob(job: Job): Job {
     specialProcesses: Array.isArray(job.specialProcesses)
       ? job.specialProcesses
       : [],
+    specialProcessOrder: orderedSpecialProcesses({
+      ...job,
+      specialProcesses: Array.isArray(job.specialProcesses)
+        ? job.specialProcesses
+        : [],
+    } as Job),
+    mechanicalAssemblyStartDate: job.mechanicalAssemblyStartDate ?? "",
     otherSpecialProcess: job.otherSpecialProcess ?? "",
     otherSpecialProcessTurnDays: job.otherSpecialProcessTurnDays ?? 0,
     polymericsOptions: (job.polymericsOptions ?? []).map((option) =>
@@ -2927,7 +2985,7 @@ export default function Home() {
           <div>
             <p className="eyebrow">Krypton Solutions OOR</p>
             <h1>{title}</h1>
-            <p className="date-line">Version 74.2 · {dateLabel(chicagoDateKey())}</p>
+            <p className="date-line">Version 75 · {dateLabel(chicagoDateKey())}</p>
           </div>
           <div className="topbar-actions">
             {(activeView === "commercial" || activeView === "aerospace") && (
@@ -3080,7 +3138,9 @@ function downloadShortageListReport(jobs: Job[]) {
   const day = date.getUTCDay();
   date.setUTCDate(date.getUTCDate() + (day === 0 ? 0 : 7 - day));
   const weekEnd = dateKey(date);
-  const openJobs = jobs.filter((job) => job.status !== "Complete");
+  const openJobs = jobs.filter(
+    (job) => job.status !== "Complete" && !job.excludeFromFollowUps,
+  );
   const workbook = XLSX.utils.book_new();
 
   function makeRow(job: Job, shortages: ShortageItem[], note = "") {
@@ -3357,6 +3417,7 @@ function DivisionView({
   const [jobSearch, setJobSearch] = useState("");
   const [showJobExcelFormat, setShowJobExcelFormat] = useState(false);
   const [selectedJobExcelIds, setSelectedJobExcelIds] = useState<string[]>([]);
+  const [jobExcelSearch, setJobExcelSearch] = useState("");
   const [showNoFollowUps, setShowNoFollowUps] = useState(false);
   const [noFollowUpIds, setNoFollowUpIds] = useState<string[]>([]);
   const [noFollowUpSearch, setNoFollowUpSearch] = useState("");
@@ -3364,6 +3425,15 @@ function DivisionView({
   const customerJobs = customer
     ? jobs.filter((job) => job.customer === customer)
     : [];
+  const activeCustomerJobs = customerJobs.filter(
+    (job) => job.status !== "Complete",
+  );
+  const normalizedJobExcelSearch = jobExcelSearch.trim().toLowerCase();
+  const jobExcelMatches = customerJobs.filter((job) =>
+    !normalizedJobExcelSearch ||
+    [job.jobNumber, job.ksid, job.pnName, job.pn, job.rev, job.poNumber]
+      .some((value) => value.toLowerCase().includes(normalizedJobExcelSearch)),
+  );
 
   function openJobExcelFormat() {
     if (!customer) {
@@ -3375,13 +3445,14 @@ function DivisionView({
       return;
     }
     setSelectedJobExcelIds(customerJobs.map((job) => job.id));
+    setJobExcelSearch("");
     setShowJobExcelFormat(true);
   }
 
   function openNoFollowUps() {
     if (!customer) return;
     setNoFollowUpIds(
-      customerJobs
+      activeCustomerJobs
         .filter((job) => job.excludeFromFollowUps)
         .map((job) => job.id),
     );
@@ -3390,7 +3461,7 @@ function DivisionView({
   }
 
   function saveNoFollowUps() {
-    customerJobs.forEach((job) =>
+    activeCustomerJobs.forEach((job) =>
       onUpdateJob(job.id, {
         excludeFromFollowUps: noFollowUpIds.includes(job.id),
       }),
@@ -3612,9 +3683,9 @@ function DivisionView({
           {customer && (
             <button className="button secondary" onClick={openNoFollowUps}>
               <Bell size={17} /> No Follow Ups
-              {customerJobs.some((job) => job.excludeFromFollowUps) && (
+              {activeCustomerJobs.some((job) => job.excludeFromFollowUps) && (
                 <span className="button-count">
-                  {customerJobs.filter((job) => job.excludeFromFollowUps).length}
+                  {activeCustomerJobs.filter((job) => job.excludeFromFollowUps).length}
                 </span>
               )}
             </button>
@@ -3734,11 +3805,23 @@ function DivisionView({
               </button>
             </div>
             <div className="job-excel-format-controls">
+              <label className="job-excel-format-search">
+                <Search size={15} />
+                <BufferedInput
+                  value={jobExcelSearch}
+                  onChange={(event) => setJobExcelSearch(event.target.value)}
+                  placeholder="Search Job#, KSID, PN, Rev, or PO#"
+                  aria-label="Search Job Excel Format"
+                />
+              </label>
               <button
                 type="button"
                 className="button small secondary"
                 onClick={() =>
-                  setSelectedJobExcelIds(customerJobs.map((job) => job.id))
+                  setSelectedJobExcelIds((current) => Array.from(new Set([
+                    ...current,
+                    ...jobExcelMatches.map((job) => job.id),
+                  ])))
                 }
               >
                 Select all
@@ -3751,11 +3834,11 @@ function DivisionView({
                 Clear all
               </button>
               <span>
-                {selectedJobExcelIds.length} of {customerJobs.length} selected
+                {selectedJobExcelIds.length} selected · {jobExcelMatches.length} shown
               </span>
             </div>
             <div className="job-excel-format-list">
-              {[...customerJobs]
+              {[...jobExcelMatches]
                 .sort((a, b) =>
                   a.jobNumber.localeCompare(b.jobNumber, undefined, {
                     numeric: true,
@@ -3838,7 +3921,7 @@ function DivisionView({
               <button
                 type="button"
                 className="button small secondary"
-                onClick={() => setNoFollowUpIds(customerJobs.map((job) => job.id))}
+                onClick={() => setNoFollowUpIds(activeCustomerJobs.map((job) => job.id))}
               >
                 SELECT ALL
               </button>
@@ -3859,7 +3942,7 @@ function DivisionView({
               </label>
             </div>
             <div className="no-follow-ups-list">
-              {customerJobs
+              {activeCustomerJobs
                 .filter((job) =>
                   job.jobNumber
                     .toLowerCase()
@@ -4503,7 +4586,7 @@ function JobTable({
         <span>PO#</span>
         <span>Level / Type</span>
         <span>Status</span>
-        <span>Due date</span>
+        <span>Krypton Dock</span>
         <span />
       </div>
       {jobs.map((job) => (
@@ -4535,12 +4618,10 @@ function JobTable({
             </em>
           </span>
           <span
-            className={daysUntil(effectiveDueDate(job)) <= 3 ? "urgent" : ""}
+            className={daysUntil(jobKryptonDockDate(job)) <= 3 ? "urgent" : ""}
           >
-            <strong>{dateLabel(effectiveDueDate(job))}</strong>
-            <small>
-              {job.customerDueDate ? "Customer due" : dueCopy(job.dueDate)}
-            </small>
+            <strong>{dateLabel(jobKryptonDockDate(job))}</strong>
+            <small>Krypton Dock Date</small>
           </span>
           <ChevronRight size={17} />
         </button>
@@ -4891,6 +4972,22 @@ function ShortageEditor({
         : job.workflowCompleted.filter((item) => item !== "shortage-list"),
     });
   }
+  function removeAllItems() {
+    if (!job.shortages.length) return;
+    if (!window.confirm(
+      `Delete all ${job.shortages.length} shortage components from Job #${job.jobNumber}? This cannot be undone.`,
+    )) return;
+    onUpdate({
+      shortages: [],
+      noShortageList: false,
+      allPartsReceivedDate: "",
+      status: job.status === "Kitting" ? "Waiting on Parts" : job.status,
+      workflowCompleted: job.workflowCompleted.filter(
+        (item) => item !== "shortage-list",
+      ),
+    });
+    notify("All shortage components deleted.");
+  }
   return (
     <section className="panel shortage-editor">
       <div className="panel-header">
@@ -4943,9 +5040,19 @@ function ShortageEditor({
                 <span>{longestLeadItems.map((item) => item.pnNumber || item.kspNumber).join(", ")} · {dateLabel(longestShortageDate)} · PCB Dock {dateLabel(job.pcbDockDate)} · Krypton Dock {dateLabel(kryptonDockDate(job))}</span>
               ) : <span>No dated open component lead time.</span>}
             </div>
-            <button className="button secondary small" type="button" onClick={copyCustomerTable}>
-              <Copy size={15} /> Copy Customer Table
-            </button>
+            <div className="shortage-summary-actions">
+              <button className="button secondary small" type="button" onClick={copyCustomerTable}>
+                <Copy size={15} /> Copy Customer Table
+              </button>
+              <button
+                className="button danger-button small"
+                type="button"
+                onClick={removeAllItems}
+                disabled={!job.shortages.length}
+              >
+                <Trash2 size={15} /> Delete All Components
+              </button>
+            </div>
           </div>
           <form className="shortage-add" onSubmit={add}>
             <label>
@@ -10746,29 +10853,32 @@ function JobDrawer({
   const kittingDue = addBusinessDays(readyDate, 1);
   const smtDue = addBusinessDays(kittingDue, job.smtDays);
   const assemblyDue = addBusinessDays(readyDate, job.assemblyTurnDays);
-  let processCursor = assemblyDue;
-  const polymericsDue = job.specialProcesses.includes("Polymerics")
-    ? (processCursor = addBusinessDays(processCursor, job.polymericsTurnDays))
+  const mechanicalAssemblyDue = job.mechanicalAssemblyStartDate
+    ? addBusinessDays(job.mechanicalAssemblyStartDate, job.assemblyTurnDays)
     : "";
-  const externalTestingDue = job.specialProcesses.includes("External Testing")
-    ? (processCursor = addBusinessDays(
-        processCursor,
-        job.externalTestingTurnDays,
-      ))
-    : "";
-  const otherProcessDue = job.specialProcesses.includes("Other")
-    ? (processCursor = addBusinessDays(
-        processCursor,
-        job.otherSpecialProcessTurnDays,
-      ))
-    : "";
+  let processCursor = buildLevel === "PCBA" ? assemblyDue : mechanicalAssemblyDue;
+  const specialProcessSchedule = orderedSpecialProcesses(job).map((process) => {
+    processCursor = processCursor
+      ? addBusinessDays(processCursor, specialProcessDays(job, process))
+      : "";
+    return {
+      process,
+      key: specialProcessMilestoneKey(process),
+      name: specialProcessLabel(job, process),
+      days: specialProcessDays(job, process),
+      date: processCursor,
+    };
+  });
   const computedKryptonDockDate =
     buildLevel === "PCBA"
       ? kryptonDockDate(job)
-      : activePartialDockDate(job) ||
+      : !job.mechanicalAssemblyStartDate
+        ? ""
+        : activePartialDockDate(job) ||
         job.kryptonDockDateOverride ||
         shipmentDates.at(-1) ||
-        initialKryptonDockDate(job);
+        processCursor ||
+        mechanicalAssemblyDue;
   type Milestone = {
     key: string;
     name: string;
@@ -10846,58 +10956,20 @@ function JobDrawer({
           "Complete",
         ].includes(job.status),
     },
-    ...(job.specialProcesses.includes("Polymerics")
-      ? [
-          {
-            key: "polymerics",
-            name: "Polymerics",
-            date: polymericsDue,
-            rule: `${job.polymericsTurnDays} business day${job.polymericsTurnDays === 1 ? "" : "s"}`,
-            done:
-              job.workflowCompleted.includes("polymerics") ||
-              job.status === "Complete",
-          },
-        ]
-      : []),
-    ...(job.specialProcesses.includes("External Testing")
-      ? [
-          {
-            key: "external-testing",
-            name: "External Testing",
-            date: externalTestingDue,
-            rule: `${job.externalTestingTurnDays} business day${job.externalTestingTurnDays === 1 ? "" : "s"}`,
-            done:
-              job.workflowCompleted.includes("external-testing") ||
-              job.status === "Complete",
-          },
-        ]
-      : []),
-    ...(job.specialProcesses.includes("FAI Report")
-      ? [
-          {
-            key: "fai-report",
-            name: "FAI Report",
-            date: computedKryptonDockDate,
-            rule: "Required special process",
-            done:
-              job.workflowCompleted.includes("fai-report") ||
-              job.status === "Complete",
-          },
-        ]
-      : []),
-    ...(job.specialProcesses.includes("Other")
-      ? [
-          {
-            key: "other-special-process",
-            name: job.otherSpecialProcess || "Other Special Process",
-            date: otherProcessDue,
-            rule: `${job.otherSpecialProcessTurnDays} business day${job.otherSpecialProcessTurnDays === 1 ? "" : "s"}`,
-            done:
-              job.workflowCompleted.includes("other-special-process") ||
-              job.status === "Complete",
-          },
-        ]
-      : []),
+    ...specialProcessSchedule.map((item, index) => ({
+      key: item.key,
+      name: item.name,
+      date: item.date,
+      rule: item.days
+        ? `${item.days} business day${item.days === 1 ? "" : "s"}`
+        : "Required special process",
+      done:
+        job.workflowCompleted.includes(item.key) ||
+        job.status === "Complete" ||
+        specialProcessSchedule.findIndex(
+          (candidate) => candidate.name === job.status,
+        ) > index,
+    })),
     {
       key: "krypton-dock",
       name: "Krypton Dock Date",
@@ -10910,6 +10982,8 @@ function JobDrawer({
     },
   ];
   const assemblyInputsReady = buildableQuantity > 0;
+  const mechanicalTimelineStarted = Boolean(job.mechanicalAssemblyStartDate);
+  const awaitingPcbaRule = "Not Set - Awaiting PCBAs";
   const milestones: Milestone[] =
     buildLevel === "PCBA"
       ? pcbaMilestones
@@ -10917,10 +10991,10 @@ function JobDrawer({
           {
             key: "assembly-inputs",
             name: buildLevel === "CCA" ? "PCBA Completion" : "CCA Completion",
-            date: latestLinkedReleaseDate(job, jobs),
-            rule: assemblyInputsReady
+            date: mechanicalTimelineStarted ? latestLinkedReleaseDate(job, jobs) : "",
+            rule: mechanicalTimelineStarted && assemblyInputsReady
               ? `${buildableQuantity} ${buildLevel}${buildableQuantity === 1 ? "" : "s"} currently buildable`
-              : `Waiting for released ${buildLevel === "CCA" ? "PCBA" : "CCA"} quantities`,
+              : awaitingPcbaRule,
             done: assemblyInputsReady,
             checkOnly: true,
             locked: true,
@@ -10928,13 +11002,15 @@ function JobDrawer({
           {
             key: "shortage-list",
             name: "Shortage List Completion",
-            date:
-              job.noShortageList ||
-              (job.shortages.length > 0 && job.shortages.every((item) => item.complete))
+            date: !mechanicalTimelineStarted
+              ? ""
+              : job.noShortageList ||
+                  (job.shortages.length > 0 && job.shortages.every((item) => item.complete))
                 ? job.allPartsReceivedDate
                 : shortageDue,
-            rule:
-              job.noShortageList ||
+            rule: !mechanicalTimelineStarted
+              ? awaitingPcbaRule
+              : job.noShortageList ||
               (job.shortages.length > 0 && job.shortages.every((item) => item.complete))
                 ? `Completed${job.allPartsReceivedDate ? ` ${dateLabel(job.allPartsReceivedDate)}` : ""}`
                 : "Complete or waive the mechanical job shortage list",
@@ -10949,8 +11025,10 @@ function JobDrawer({
               buildLevel === "CCA"
                 ? "CCA Mechanical Assembly"
                 : "LRU Mechanical Assembly",
-            date: job.dueDate,
-            rule: `${(job.mechanicalShipments ?? []).length} scheduled shipment batch${(job.mechanicalShipments ?? []).length === 1 ? "" : "es"}`,
+            date: mechanicalAssemblyDue,
+            rule: mechanicalTimelineStarted
+              ? `${(job.mechanicalShipments ?? []).length} scheduled shipment batch${(job.mechanicalShipments ?? []).length === 1 ? "" : "es"}`
+              : awaitingPcbaRule,
             done:
               job.workflowCompleted.includes("mechanical-assembly") ||
               job.status === "Complete",
@@ -10958,11 +11036,29 @@ function JobDrawer({
               !job.workflowCompleted.includes("mechanical-assembly") &&
               (!assemblyInputsReady || !assemblyShortagesReady(job)),
           },
+          ...specialProcessSchedule.map((item, index) => ({
+            key: item.key,
+            name: item.name,
+            date: mechanicalTimelineStarted ? item.date : "",
+            rule: mechanicalTimelineStarted
+              ? item.days
+                ? `${item.days} business day${item.days === 1 ? "" : "s"}`
+                : "Required special process"
+              : awaitingPcbaRule,
+            done:
+              job.workflowCompleted.includes(item.key) ||
+              job.status === "Complete" ||
+              specialProcessSchedule.findIndex(
+                (candidate) => candidate.name === job.status,
+              ) > index,
+          })),
           {
             key: "krypton-dock",
             name: `${buildLevel} Dock Date`,
             date: computedKryptonDockDate,
-            rule: "Final tracking and closeout for this assembly job",
+            rule: mechanicalTimelineStarted
+              ? "Final tracking and closeout for this assembly job"
+              : awaitingPcbaRule,
             done:
               job.workflowCompleted.includes("krypton-dock") ||
               job.status === "Complete",
@@ -11355,8 +11451,21 @@ function JobDrawer({
       : job.specialProcesses.filter((item) => item !== name);
     onUpdate({
       specialProcesses,
+      specialProcessOrder: enabled
+        ? Array.from(new Set([...(job.specialProcessOrder ?? job.specialProcesses), name]))
+        : (job.specialProcessOrder ?? job.specialProcesses).filter(
+            (item) => item !== name,
+          ),
       dueDate: calculatedJobDueDate(job, { specialProcesses }),
     });
+  }
+  function moveSpecialProcess(name: string, direction: -1 | 1) {
+    const order = orderedSpecialProcesses(job);
+    const index = order.indexOf(name);
+    const nextIndex = index + direction;
+    if (index < 0 || nextIndex < 0 || nextIndex >= order.length) return;
+    [order[index], order[nextIndex]] = [order[nextIndex], order[index]];
+    onUpdate({ specialProcessOrder: order });
   }
   function setPolymericsOption(option: PolymericsOption, enabled: boolean) {
     onUpdate({
@@ -11706,6 +11815,12 @@ function JobDrawer({
                   const status = event.target.value as JobStatus;
                   onUpdate({
                     status,
+                    ...(buildLevel !== "PCBA" && status === "Mechanical Assembly"
+                      ? {
+                          mechanicalAssemblyStartDate:
+                            job.mechanicalAssemblyStartDate || chicagoDateKey(),
+                        }
+                      : {}),
                     ...(status === "TH ASSY"
                       ? {
                           workflowCompleted: Array.from(
@@ -11716,7 +11831,12 @@ function JobDrawer({
                   });
                 }}
               >
-                {jobStatuses.map((item) => (
+                {Array.from(new Set([
+                  ...jobStatuses,
+                  ...orderedSpecialProcesses(job).map((process) =>
+                    specialProcessLabel(job, process),
+                  ),
+                ])).map((item) => (
                   <option key={item}>{item}</option>
                 ))}
               </select>
@@ -12187,6 +12307,36 @@ function JobDrawer({
                     .join(" · ")
                 : "None"}
             </p>
+            {orderedSpecialProcesses(job).length > 1 && (
+              <div className="special-process-order-editor">
+                <span>Workflow order</span>
+                {orderedSpecialProcesses(job).map((process, index, order) => (
+                  <div key={process}>
+                    <strong>{index + 1}. {specialProcessLabel(job, process)}</strong>
+                    <span>
+                      <button
+                        type="button"
+                        className="icon-button"
+                        disabled={index === 0}
+                        onClick={() => moveSpecialProcess(process, -1)}
+                        aria-label={`Move ${specialProcessLabel(job, process)} earlier`}
+                      >
+                        <ChevronUp size={16} />
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-button"
+                        disabled={index === order.length - 1}
+                        onClick={() => moveSpecialProcess(process, 1)}
+                        aria-label={`Move ${specialProcessLabel(job, process)} later`}
+                      >
+                        <ChevronDown size={16} />
+                      </button>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
             {job.specialProcesses.includes("Polymerics") && (
               <div className="polymerics-options process-option-editor">
                 <span>Polymerics requirements</span>

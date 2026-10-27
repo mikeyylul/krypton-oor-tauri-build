@@ -8112,3 +8112,49 @@ button:disabled {
 }
 .operational-table { overflow-x: auto; }
 .follow-up-job-summary small { display: block; }
+.shortage-summary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.job-excel-format-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: min(100%, 320px);
+  flex: 1 1 280px;
+}
+
+.job-excel-format-search input {
+  width: 100%;
+}
+
+.special-process-order-editor {
+  display: grid;
+  gap: 7px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-soft);
+}
+
+.special-process-order-editor > span {
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.special-process-order-editor > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.special-process-order-editor > div > span {
+  display: flex;
+  gap: 4px;
+}

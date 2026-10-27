@@ -143,9 +143,22 @@ console.log(
   "Validated Website Version 69 parity, Job Excel Format QTY output, received-shortage filtering in customer copies, LRU CCA/PCBA selection, editable existing assembly links, customer-folder propagation, Windows organization-folder drag-and-drop, native RFQ folder creation, local autosave identity, packaged photo OCR, and Tauri offline restrictions.",
 );
 
-for (const fragment of ["Shortage List Report", "BufferedInput", "BufferedTextarea", "flushDeferredEdits", "applyStatusWorkflow", "actualCustomer"]) {
-  if (!desktopSource.includes(fragment)) throw new Error("Missing Version 74 behavior: " + fragment);
+for (const fragment of [
+  "Shortage List Report",
+  "BufferedInput",
+  "BufferedTextarea",
+  "flushDeferredEdits",
+  "applyStatusWorkflow",
+  "actualCustomer",
+  "specialProcessOrder",
+  "mechanicalAssemblyStartDate",
+  "Not Set - Awaiting PCBAs",
+  "Search Job Excel Format",
+  "Delete All Components",
+  'job.status !== "Complete" && !job.excludeFromFollowUps',
+]) {
+  if (!desktopSource.includes(fragment)) throw new Error("Missing Version 75 behavior: " + fragment);
 }
 if (desktopSource.includes('id: "quotes"') || desktopSource.includes("function QuotesView(")) throw new Error("Retired quote UI remains");
 if (!rustSource.includes("fn finish_close") || !rustSource.includes("krypton-before-close")) throw new Error("Native close must flush edits");
-console.log("Validated Version 74 source parity and close-flush integration.");
+console.log("Validated Version 75 source parity and close-flush integration.");
