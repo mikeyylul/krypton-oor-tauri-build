@@ -143,9 +143,35 @@ console.log(
   "Validated Website Version 69 parity, Job Excel Format QTY output, received-shortage filtering in customer copies, LRU CCA/PCBA selection, editable existing assembly links, customer-folder propagation, Windows organization-folder drag-and-drop, native RFQ folder creation, local autosave identity, packaged photo OCR, and Tauri offline restrictions.",
 );
 
-for (const fragment of ["Shortage List Report", "BufferedInput", "BufferedTextarea", "flushDeferredEdits", "applyStatusWorkflow", "actualCustomer"]) {
-  if (!desktopSource.includes(fragment)) throw new Error("Missing Version 74 behavior: " + fragment);
+for (const fragment of [
+  "Weekly Report",
+  "BufferedInput",
+  "BufferedTextarea",
+  "flushDeferredEdits",
+  "applyStatusWorkflow",
+  "actualCustomer",
+  "specialProcessOrder",
+  "mechanicalAssemblyStartDate",
+  "Not Set - Awaiting PCBAs",
+  "Search Job Excel Format",
+  'const jobExcelMatches = activeCustomerJobs.filter',
+  '"Krypton Dock Date": dateLabel(jobKryptonDockDate(job))',
+  'Completed jobs are kept in this section and excluded from Job Excel Format.',
+  "Delete All Components",
+  'job.status !== "Complete" && !job.excludeFromFollowUps',
+  "On Schedule Builds",
+  "Validation Override (Past Due Only)",
+  "addCompletedJobsChart",
+  "downloadWrappedWorkbook(\n        workbook,\n        `Krypton-Solutions-OOR-Complete-Backup",
+]) {
+  if (!desktopSource.includes(fragment)) throw new Error("Missing Version 76 behavior: " + fragment);
 }
 if (desktopSource.includes('id: "quotes"') || desktopSource.includes("function QuotesView(")) throw new Error("Retired quote UI remains");
 if (!rustSource.includes("fn finish_close") || !rustSource.includes("krypton-before-close")) throw new Error("Native close must flush edits");
-console.log("Validated Version 74 source parity and close-flush integration.");
+for (const fragment of ["fn save_export_file", "SaveFileDialog", "contents_base64", "save_export_file,"]) {
+  if (!rustSource.includes(fragment)) throw new Error("Missing native Windows export behavior: " + fragment);
+}
+if (!desktopSource.includes('desktopInvoke<string | null>("save_export_file"')) {
+  throw new Error("Excel exports must use the native Windows save command");
+}
+console.log("Validated Version 78 active-only Job Excel Format, Krypton Dock Date output, native Windows Excel save, and source parity.");

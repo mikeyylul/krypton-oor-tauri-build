@@ -1,6 +1,6 @@
 [package]
 name = "krypton-oor"
-version = "74.2.0"
+version = "78.0.0"
 description = "Offline Krypton Solutions OOR project workflow application"
 authors = ["Krypton Solutions"]
 edition = "2021"
@@ -13,6 +13,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+base64 = "0.22"
 tauri = { version = "2", features = [] }
 
 [features]
