@@ -154,6 +154,9 @@ for (const fragment of [
   "mechanicalAssemblyStartDate",
   "Not Set - Awaiting PCBAs",
   "Search Job Excel Format",
+  'const jobExcelMatches = activeCustomerJobs.filter',
+  '"Krypton Dock Date": dateLabel(jobKryptonDockDate(job))',
+  'Completed jobs are kept in this section and excluded from Job Excel Format.',
   "Delete All Components",
   'job.status !== "Complete" && !job.excludeFromFollowUps',
   "On Schedule Builds",
@@ -171,4 +174,4 @@ for (const fragment of ["fn save_export_file", "SaveFileDialog", "contents_base6
 if (!desktopSource.includes('desktopInvoke<string | null>("save_export_file"')) {
   throw new Error("Excel exports must use the native Windows save command");
 }
-console.log("Validated Version 77 native Windows Excel save, source parity, workbook exports, and close-flush integration.");
+console.log("Validated Version 78 active-only Job Excel Format, Krypton Dock Date output, native Windows Excel save, and source parity.");

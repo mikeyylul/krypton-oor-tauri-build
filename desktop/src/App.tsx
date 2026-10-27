@@ -3224,7 +3224,7 @@ export default function Home() {
           <div>
             <p className="eyebrow">Krypton Solutions OOR</p>
             <h1>{title}</h1>
-            <p className="date-line">Version 77 · {dateLabel(chicagoDateKey())}</p>
+            <p className="date-line">Version 78 · {dateLabel(chicagoDateKey())}</p>
           </div>
           <div className="topbar-actions">
             {(activeView === "commercial" || activeView === "aerospace") && (
@@ -3720,7 +3720,7 @@ function DivisionView({
     (job) => job.status !== "Complete",
   );
   const normalizedJobExcelSearch = jobExcelSearch.trim().toLowerCase();
-  const jobExcelMatches = customerJobs.filter((job) =>
+  const jobExcelMatches = activeCustomerJobs.filter((job) =>
     !normalizedJobExcelSearch ||
     [job.jobNumber, job.ksid, job.pnName, job.pn, job.rev, job.poNumber]
       .some((value) => value.toLowerCase().includes(normalizedJobExcelSearch)),
@@ -3731,11 +3731,11 @@ function DivisionView({
       notify("Select a customer sub-category before using Job Excel Format.");
       return;
     }
-    if (!customerJobs.length) {
-      notify(`There are no jobs in ${customer} to copy.`);
+    if (!activeCustomerJobs.length) {
+      notify(`There are no active jobs in ${customer} to copy.`);
       return;
     }
-    setSelectedJobExcelIds(customerJobs.map((job) => job.id));
+    setSelectedJobExcelIds(activeCustomerJobs.map((job) => job.id));
     setJobExcelSearch("");
     setShowJobExcelFormat(true);
   }
@@ -3768,7 +3768,7 @@ function DivisionView({
   }
 
   async function copyJobExcelFormat() {
-    const selectedJobs = customerJobs
+    const selectedJobs = activeCustomerJobs
       .filter((job) => selectedJobExcelIds.includes(job.id))
       .sort((a, b) =>
         a.jobNumber.localeCompare(b.jobNumber, undefined, { numeric: true }),
@@ -3789,7 +3789,7 @@ function DivisionView({
         REV: job.rev,
         QTY: job.quantity,
         "Level/Type": job.buildLevel || job.projectType,
-        "Due Date": dateLabel(effectiveDueDate(job)),
+        "Krypton Dock Date": dateLabel(jobKryptonDockDate(job)),
         "Recent Note": latestNote?.text.replace(/\s+/g, " ").trim() ?? "",
       };
     });
@@ -3801,7 +3801,7 @@ function DivisionView({
       "REV",
       "QTY",
       "Level/Type",
-      "Due Date",
+      "Krypton Dock Date",
       "Recent Note",
     ] as const;
     const escapeCell = (value: string) =>
@@ -4062,6 +4062,7 @@ function DivisionView({
               <em>{completed.length}</em>
             </summary>
             <div className="completed-jobs-content">
+              <p>Completed jobs are kept in this section and excluded from Job Excel Format.</p>
               <JobTable jobs={completed} onOpen={onOpen} />
             </div>
           </details>

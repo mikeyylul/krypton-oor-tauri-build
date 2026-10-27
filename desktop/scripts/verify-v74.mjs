@@ -42,8 +42,10 @@ jobs[0].specialProcesses = ["Polymerics", "External Testing"];
 jobs[0].specialProcessOrder = ["Polymerics", "External Testing"];
 jobs[0].polymericsTurnDays = 2;
 jobs[0].externalTestingTurnDays = 3;
+jobs[0].kryptonDockDateOverride = day(12);
+jobs[4].customer = jobs[0].customer;
 const folder = { id: "test-folder", name: "Large organization", division: "Commercial",
-  collapsed: false, customers: jobs.map((job) => job.customer.trim()) };
+  collapsed: false, customers: Array.from(new Set(jobs.map((job) => job.customer.trim()))) };
 const dockSource = source.slice(source.indexOf("function materialsReadyDate("), source.indexOf("function pcbaReadyForKitting(")).replace("job: Job", "job");
 const dock = Function("latestDate", dockSource + "; return materialsReadyDate;")((dates) => dates.sort().at(-1) || "");
 assert.equal(dock(jobs[0]), day(2), "Undated items do not block dock date");
@@ -89,7 +91,7 @@ try {
   await comment.waitFor(); await page.waitForTimeout(1300);
   assert.equal(await page.getByRole("button", { name: "Quotes", exact: true }).count(), 0);
   assert.equal(await page.evaluate(() => localStorage.getItem("krypton-oor-quotes-v1")), null);
-  assert.equal(await page.locator(".organization-folder-customers button").count(), 80);
+  assert.equal(await page.locator(".organization-folder-customers button").count(), 79);
   await page.evaluate(() => { window.__saveCount = 0; performance.clearMarks(); });
   await comment.pressSequentially("x".repeat(100), { delay: 1 });
   await page.waitForTimeout(850);
@@ -122,7 +124,7 @@ try {
   await page.evaluate(() => window.dispatchEvent(new Event("blur")));
   await page.reload(); await comment.waitFor();
   assert.equal(await comment.inputValue(), "Flushed on focus loss");
-  assert.equal(await page.locator(".organization-folder-customers button").count(), 80);
+  assert.equal(await page.locator(".organization-folder-customers button").count(), 79);
   await page.goto("http://127.0.0.1:1420/");
   await page.getByRole("button", { name: "Weekly Report", exact: true }).waitFor();
   await page.waitForTimeout(800);
@@ -230,8 +232,26 @@ try {
   const head = page.locator(".grouped-action-head").first();
   assert.equal(await head.locator("span").nth(3).textContent(), "PN Name");
   assert.equal(await head.locator("span").nth(4).innerText(), "PN");
+
+  await page.getByRole("button", { name: /Test Customer 000/ }).click();
+  const completedSection = page.locator(".completed-jobs-section");
+  assert.match(await completedSection.locator("summary").innerText(), /Completed\s+1/);
+  await page.getByRole("button", { name: "Job Excel Format", exact: true }).click();
+  const jobExcelDialog = page.getByRole("dialog", { name: "Job Excel Format" });
+  assert.equal(await jobExcelDialog.locator(".job-excel-format-list label").count(), 1);
+  assert.equal(await jobExcelDialog.getByText("Job #91004", { exact: true }).count(), 0, "Completed jobs stay out of Job Excel Format");
+  await page.evaluate(() => { window.__copiedHtml = undefined; });
+  await jobExcelDialog.getByRole("button", { name: "Copy selected jobs", exact: true }).click();
+  await page.waitForFunction(() => typeof window.__copiedHtml === "string");
+  const jobExcelHtml = await page.evaluate(() => window.__copiedHtml);
+  const expectedKryptonDock = new Date(`${day(12)}T12:00:00`).toLocaleDateString("en-US", {
+    month: "short", day: "numeric", year: "numeric",
+  });
+  assert.match(jobExcelHtml, /Krypton Dock Date/);
+  assert(jobExcelHtml.includes(expectedKryptonDock), "Job Excel Format uses Krypton Dock Date");
+  assert(!jobExcelHtml.includes("91004"), "Completed job is not copied");
   assert.deepEqual(errors, []);
-  console.log("PASS: Version 77 native Windows backup save, Version 76 reports, and all Version 70-75 regressions.");
+  console.log("PASS: Version 78 active-only Job Excel Format with Krypton Dock Date and all Version 70-77 regressions.");
 } finally {
   await browser?.close();
   if (process.platform === "win32") spawn("taskkill", ["/pid", String(server.pid), "/T", "/F"]);
