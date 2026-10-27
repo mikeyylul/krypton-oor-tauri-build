@@ -33,6 +33,7 @@ jobs[2].shortages = [shortage("customer", day(-1), true), shortage("customer-fut
 jobs[3].noShortageList = true;
 jobs[4].status = "Complete";
 jobs[6].shortages = [shortage("today", day(0)), shortage("another", day(-1)), shortage("mixed-undated", "")];
+jobs[6].workflowCompleted = ["fabrication-dock"];
 jobs[7].shortages = [shortage("only-undated", "")];
 jobs[8].workflowCompleted = ["shortage-list"];
 jobs[9].shortages = [shortage("no-follow-up", day(-3))];
@@ -123,16 +124,20 @@ try {
   assert.equal(await comment.inputValue(), "Flushed on focus loss");
   assert.equal(await page.locator(".organization-folder-customers button").count(), 80);
   await page.goto("http://127.0.0.1:1420/");
-  await page.getByRole("button", { name: "Shortage List Report", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Weekly Report", exact: true }).waitFor();
   await page.waitForTimeout(800);
   const downloaded = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Shortage List Report", exact: true }).click();
+  await page.getByRole("button", { name: "Weekly Report", exact: true }).click();
   const download = await downloaded;
   const file = await download.path();
   const workbook = XLSX.readFile(file);
-  assert.deepEqual(workbook.SheetNames, ["Commercial", "Aerospace", "Customer Supplied", "Need Shortage Report"]);
+  assert.deepEqual(workbook.SheetNames, ["Commercial", "Aerospace", "Customer Supplied", "Need Shortage Report", "On Schedule Builds"]);
   const header = ["Customer Name", "Job #", "KSID", "PN Name", "PN and Rev", "Issue KSP#", "KS Purchasing Team Comments"];
-  for (const name of workbook.SheetNames) assert.deepEqual(XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1 })[0], header);
+  for (const name of workbook.SheetNames.slice(0, 4)) assert.deepEqual(XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1 })[0], header);
+  assert.deepEqual(XLSX.utils.sheet_to_json(workbook.Sheets["On Schedule Builds"], { header: 1 })[0], [
+    "Customer Name", "Job #", "KSID", "PN Name", "PN and Rev", "Project Creation Date",
+    "Has Shortage Been Pulled", "PCB Dock Date Confirmed", "Krypton Dock Date",
+  ]);
   const report = JSON.stringify(workbook.Sheets);
   assert(report.includes("KSP-old")); assert(report.includes("KSP-customer"));
   assert(!report.includes("KSP-future")); assert(!report.includes("KSP-received")); assert(!report.includes("KSP-customer-future"));
@@ -152,15 +157,56 @@ try {
   assert.equal(grouped[0][6] ?? "", "", "Purchasing comments column remains blank");
   assert(grouped[0][5].endsWith("Not Set"), "Undated bullet last");
   assert.equal(commercialRows.at(-1)[1], "91007", "Undated-only job sorted last");
+  const onScheduleRows = XLSX.utils.sheet_to_json(workbook.Sheets["On Schedule Builds"], { header: 1 }).slice(1);
+  const confirmedPcb = onScheduleRows.find((row) => row[1] === "91006");
+  assert.equal(confirmedPcb[7], "Yes", "Fabrication workflow check confirms PCB Dock Date");
+  assert(!onScheduleRows.some((row) => row[1] === "91009"), "No Follow Ups jobs stay out of Weekly Report");
   const archive = XLSX.CFB.read(fs.readFileSync(file), { type: "buffer" });
   const styles = archive.FileIndex[archive.FullPaths.findIndex((path) => path.endsWith("/xl/styles.xml"))];
   assert(Buffer.from(styles.content).toString().includes('wrapText="1"'));
+
+  const exportStarted = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export Excel", exact: true }).click();
+  const exportDownload = await exportStarted;
+  const exportFile = await exportDownload.path();
+  const exportedJobs = XLSX.readFile(exportFile, { cellDates: true });
+  assert.deepEqual(exportedJobs.SheetNames, ["Large organization", "Completed Jobs"]);
+  const organizationRows = XLSX.utils.sheet_to_json(exportedJobs.Sheets["Large organization"], { header: 1 });
+  assert.deepEqual(organizationRows[0], [
+    "Customer Name", "Job#", "KSID", "PN Name", "PN and Rev", "Project Created",
+    "PO#", "Quote#", "Current Status of Job", "Latest Note", "Krypton Dock Date", "Special Notes",
+  ]);
+  assert(organizationRows.some((row) => row[1] === "91009"), "All booked No Follow Ups jobs remain in Export Excel");
+  const exportedJobZero = organizationRows.find((row) => row[1] === "91000");
+  assert.match(exportedJobZero[11], /Special processes: Polymerics, External Testing/);
+  assert.match(exportedJobZero[11], /Missing shortage dates/);
+  const completedSheet = exportedJobs.Sheets["Completed Jobs"];
+  assert.equal(completedSheet.H2.f.includes('I2="Job was completed on time"'), true);
+  assert.equal(completedSheet.M2.f, 'COUNTIF(H2:H2,"Early")');
+  const exportArchive = XLSX.CFB.read(fs.readFileSync(exportFile), { type: "buffer" });
+  assert(exportArchive.FullPaths.some((path) => path.endsWith("/xl/charts/chart1.xml")), "Completed Jobs chart exists");
+  assert(exportArchive.FullPaths.some((path) => path.endsWith("/xl/drawings/drawing1.xml")), "Chart is attached to the worksheet");
+
+  await page.getByRole("button", { name: /^Settings/ }).click();
+  const backupStarted = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export complete backup", exact: true }).click();
+  const backupDownload = await backupStarted;
+  const backupFile = await backupDownload.path();
+  const backupWorkbook = XLSX.readFile(backupFile);
+  assert.deepEqual(backupWorkbook.SheetNames, ["Complete Backup", "Read Me"]);
+  const backupRows = XLSX.utils.sheet_to_json(backupWorkbook.Sheets["Complete Backup"]);
+  assert.equal(backupRows.filter((row) => row["Record Type"] === "Job").length, 80);
+  assert.equal(backupRows.filter((row) => row["Record Type"] === "Customer Organization Folder").length, 1);
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByLabel("Import complete Excel backup").setInputFiles(backupFile);
+  await page.getByText(/Backup restored: 80 jobs/).waitFor();
+
   await page.getByRole("button", { name: /List of Action Items/ }).click();
   const head = page.locator(".grouped-action-head").first();
   assert.equal(await head.locator("span").nth(3).textContent(), "PN Name");
   assert.equal(await head.locator("span").nth(4).innerText(), "PN");
   assert.deepEqual(errors, []);
-  console.log("PASS: 80 folder memberships survive reload; customer dates/copy; dock drivers; workflow completion; blur flush; four-sheet Excel filtering, MM/DD/YYYY dates, blank purchasing comments, and wrap alignment; PN columns; quote removal.");
+  console.log("PASS: Version 76 Weekly Report, organized Export Excel with formulas/chart, complete backup export/import, and all Version 70-75 regressions.");
 } finally {
   await browser?.close();
   if (process.platform === "win32") spawn("taskkill", ["/pid", String(server.pid), "/T", "/F"]);

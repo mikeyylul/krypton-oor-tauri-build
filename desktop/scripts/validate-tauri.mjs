@@ -144,7 +144,7 @@ console.log(
 );
 
 for (const fragment of [
-  "Shortage List Report",
+  "Weekly Report",
   "BufferedInput",
   "BufferedTextarea",
   "flushDeferredEdits",
@@ -156,9 +156,13 @@ for (const fragment of [
   "Search Job Excel Format",
   "Delete All Components",
   'job.status !== "Complete" && !job.excludeFromFollowUps',
+  "On Schedule Builds",
+  "Validation Override (Past Due Only)",
+  "addCompletedJobsChart",
+  "downloadWrappedWorkbook(\n        workbook,\n        `Krypton-Solutions-OOR-Complete-Backup",
 ]) {
-  if (!desktopSource.includes(fragment)) throw new Error("Missing Version 75 behavior: " + fragment);
+  if (!desktopSource.includes(fragment)) throw new Error("Missing Version 76 behavior: " + fragment);
 }
 if (desktopSource.includes('id: "quotes"') || desktopSource.includes("function QuotesView(")) throw new Error("Retired quote UI remains");
 if (!rustSource.includes("fn finish_close") || !rustSource.includes("krypton-before-close")) throw new Error("Native close must flush edits");
-console.log("Validated Version 75 source parity and close-flush integration.");
+console.log("Validated Version 76 source parity, workbook exports, and close-flush integration.");

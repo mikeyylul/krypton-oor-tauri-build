@@ -119,7 +119,85 @@ function BufferedTextarea(props: ComponentProps<"textarea">) {
 
 // SheetJS Community Edition ignores alignment styles on export.
 // Add wrap alignment to its generated OOXML styles using its bundled ZIP writer.
-function downloadWrappedWorkbook(workbook: XLSX.WorkBook, filename: string) {
+function addCompletedJobsChart(
+  archive: any,
+  cfb: any,
+  worksheetNumber: number,
+) {
+  const encode = (value: string) => new TextEncoder().encode(value);
+  const add = (path: string, xml: string) =>
+    cfb.utils.cfb_add(archive, path, encode(xml));
+  const find = (suffix: string) =>
+    archive.FullPaths.findIndex((path: string) => path.endsWith(suffix));
+  const patchEntry = (suffix: string, update: (xml: string) => string) => {
+    const index = find(suffix);
+    if (index < 0) throw new Error(`Excel package entry missing: ${suffix}`);
+    const entry = archive.FileIndex[index];
+    const xml = update(new TextDecoder().decode(new Uint8Array(entry.content)));
+    entry.content = encode(xml);
+    entry.size = entry.content.length;
+  };
+
+  const sheetPath = `/xl/worksheets/sheet${worksheetNumber}.xml`;
+  patchEntry(sheetPath, (xml) =>
+    xml.replace(
+      "</worksheet>",
+      '<drawing r:id="rId999"/></worksheet>',
+    ),
+  );
+  add(
+    `xl/worksheets/_rels/sheet${worksheetNumber}.xml.rels`,
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId999" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/>' +
+      "</Relationships>",
+  );
+  add(
+    "xl/drawings/drawing1.xml",
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">' +
+      '<xdr:twoCellAnchor><xdr:from><xdr:col>10</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>5</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>' +
+      '<xdr:to><xdr:col>17</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>20</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>' +
+      '<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Completed Jobs Delivery Chart"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm/>' +
+      '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"/></a:graphicData></a:graphic>' +
+      '</xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>',
+  );
+  add(
+    "xl/drawings/_rels/drawing1.xml.rels",
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/>' +
+      "</Relationships>",
+  );
+  add(
+    "xl/charts/chart1.xml",
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><c:chart>' +
+      '<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>Completed Job Delivery Performance</a:t></a:r></a:p></c:rich></c:tx><c:layout/><c:overlay val="0"/></c:title>' +
+      '<c:plotArea><c:layout/><c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:varyColors val="1"/>' +
+      '<c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:v>Jobs</c:v></c:tx>' +
+      '<c:cat><c:strRef><c:f>\'Completed Jobs\'!$L$2:$L$4</c:f></c:strRef></c:cat>' +
+      '<c:val><c:numRef><c:f>\'Completed Jobs\'!$M$2:$M$4</c:f></c:numRef></c:val></c:ser>' +
+      '<c:axId val="97234001"/><c:axId val="97234002"/></c:barChart>' +
+      '<c:catAx><c:axId val="97234001"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:axPos val="b"/><c:tickLblPos val="nextTo"/><c:crossAx val="97234002"/><c:crosses val="autoZero"/><c:auto val="1"/><c:lblAlgn val="ctr"/><c:lblOffset val="100"/></c:catAx>' +
+      '<c:valAx><c:axId val="97234002"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:axPos val="l"/><c:majorGridlines/><c:numFmt formatCode="0" sourceLinked="0"/><c:tickLblPos val="nextTo"/><c:crossAx val="97234001"/><c:crosses val="autoZero"/><c:crossBetween val="between"/></c:valAx>' +
+      '</c:plotArea><c:plotVisOnly val="1"/><c:dispBlanksAs val="zero"/></c:chart></c:chartSpace>',
+  );
+  patchEntry("/[Content_Types].xml", (xml) =>
+    xml.replace(
+      "</Types>",
+      '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>' +
+      '<Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>' +
+      "</Types>",
+    ),
+  );
+}
+
+function downloadWrappedWorkbook(
+  workbook: XLSX.WorkBook,
+  filename: string,
+  options: { completedJobsChart?: boolean } = {},
+) {
   const cfb = (XLSX as any).CFB;
   const archive = cfb.read(new Uint8Array(XLSX.write(workbook, {
     type: "array", bookType: "xlsx", compression: false,
@@ -135,6 +213,10 @@ function downloadWrappedWorkbook(workbook: XLSX.WorkBook, filename: string) {
     ) + "</cellXfs>");
   entry.content = new TextEncoder().encode(xml);
   entry.size = entry.content.length;
+  if (options.completedJobsChart) {
+    const completedIndex = workbook.SheetNames.indexOf("Completed Jobs");
+    if (completedIndex >= 0) addCompletedJobsChart(archive, cfb, completedIndex + 1);
+  }
   const bytes = cfb.write(archive, { type: "buffer", fileType: "zip", compression: false });
   const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -311,6 +393,7 @@ type Job = {
   poNumber: string;
   quoteNumber: string;
   status: JobStatus;
+  completedDate?: string;
   buildLevel?: BuildLevel;
   familyId?: string;
   projectFamilyName?: string;
@@ -1321,6 +1404,7 @@ function normalizeJob(job: Job): Job {
             quantityNumber(job.quantity),
             Math.max(0, Number(job.completedQuantity) || (job.status === "Complete" ? quantityNumber(job.quantity) : 0)),
           ),
+    completedDate: job.completedDate ?? "",
     quantityReleases: (job.quantityReleases ?? []).map((release) => ({
       ...release,
       quantity: Math.max(0, Number(release.quantity) || 0),
@@ -2328,15 +2412,23 @@ export default function Home() {
   function updateJob(id: string, change: Partial<Job>) {
     setJobs((current) => {
       const previous = current.find((job) => job.id === id);
-      const textOnly = Object.keys(change).every((key) =>
+      const datedChange: Partial<Job> = {
+        ...change,
+        ...(change.status === "Complete" && previous?.status !== "Complete"
+          ? { completedDate: chicagoDateKey() }
+          : change.status && change.status !== "Complete" && previous?.status === "Complete"
+            ? { completedDate: "" }
+            : {}),
+      };
+      const textOnly = Object.keys(datedChange).every((key) =>
         ["pnName", "contact", "poNumber", "quoteNumber", "notes", "trackingInformation"].includes(key)
-        || (key === "shortages" && previous && change.shortages?.length === previous.shortages.length
-          && change.shortages.every((item, index) => {
+        || (key === "shortages" && previous && datedChange.shortages?.length === previous.shortages.length
+          && datedChange.shortages.every((item, index) => {
             const old = previous.shortages[index];
             return item.id === old.id && item.complete === old.complete
               && item.dueDate === old.dueDate && item.customerSupplied === old.customerSupplied;
           })));
-      const next = current.map((job) => job.id === id ? { ...job, ...change } : job);
+      const next = current.map((job) => job.id === id ? { ...job, ...datedChange } : job);
       return textOnly ? next : reconcileAssemblyStatuses(next);
     });
   }
@@ -2511,62 +2603,187 @@ export default function Home() {
   }
 
   function exportJobs() {
-    const rows = jobs.map((job) => ({
-      Division: job.division,
-      Customer: job.customer,
-      "Build Level": jobBuildLevel(job),
-      "Project Family": job.familyId ?? job.id,
-      "Job #": job.jobNumber,
-      KSID: job.ksid,
-      "PN Name": job.pnName,
-      PN: job.pn,
-      Rev: job.rev,
-      QTY: job.quantity,
-      "Project Type": job.projectType,
-      Contact: job.contact,
-      "Calculated Due Date": job.dueDate,
-      "Customer Due Date": job.customerDueDate,
-      "PO#": job.poNumber,
-      "Quote#": job.quoteNumber,
-      Status: job.status,
-      "Special Processes": job.specialProcesses.join("; "),
-      "Other Special Process": job.otherSpecialProcess,
-      "Other Special Process Turn Time": job.otherSpecialProcessTurnDays,
-      Polymerics: job.polymericsOptions.join("; "),
-      "Project Created": job.createdDate,
-      "PCB Dock Date": job.pcbDockDate,
-      "PCB Arrived": job.pcbArrived ? "Yes" : "No",
-      "Krypton Dock Date": kryptonDockDate(job),
-      "Fabrication Turn Time": job.fabricationTurnDays,
-      "Assembly Turn Time": job.assemblyTurnDays,
-      "Polymerics Turn Time": job.polymericsTurnDays,
-      "External Testing Turn Time": job.externalTestingTurnDays,
-      "SMT Days": job.smtDays,
-      "Open Shortages": job.shortages.filter((item) => !item.complete).length,
-      "Assembly Configuration":
-        assemblyRecipes.find((recipe) => recipe.id === job.assemblyRecipeId)
-          ?.name ?? "",
-      "Assembly Inputs": (job.assemblyRequirements ?? [])
-        .map(
-          (item) =>
-            `${item.quantityPerAssembly} × ${item.inputLevel} ${item.pn}${item.rev ? ` Rev ${item.rev}` : ""}`,
-        )
-        .join("; "),
-    }));
+    flushDeferredEdits();
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(
-      workbook,
-      XLSX.utils.json_to_sheet(rows),
-      "Jobs",
-    );
-    XLSX.writeFile(
-      workbook,
-      `Krypton-Solutions-OOR-Jobs-${chicagoDateKey()}.xlsx`,
-    );
-    notify("Excel workbook downloaded.");
+    const usedSheetNames = new Set<string>();
+    const safeSheetName = (requested: string) => {
+      const base = requested.replace(/[\\/?*\[\]:]/g, " ").replace(/\s+/g, " ").trim() || "Jobs";
+      let name = base.slice(0, 31);
+      let suffix = 2;
+      while (usedSheetNames.has(name.toLowerCase())) {
+        const ending = ` ${suffix++}`;
+        name = `${base.slice(0, 31 - ending.length)}${ending}`;
+      }
+      usedSheetNames.add(name.toLowerCase());
+      return name;
+    };
+    const excelDate = (value: string) =>
+      value ? new Date(`${value}T12:00:00`) : "";
+    const latestNote = (job: Job) =>
+      [...job.notes].sort((a, b) =>
+        `${b.date}${b.createdAt}`.localeCompare(`${a.date}${a.createdAt}`),
+      )[0];
+    const specialNotes = (job: Job) => {
+      const notes: string[] = [];
+      const processes = orderedSpecialProcesses(job).map((process) =>
+        specialProcessLabel(job, process),
+      );
+      if (processes.length) notes.push(`Special processes: ${processes.join(", ")}`);
+      if (!job.noShortageList && !job.shortages.length && !job.workflowCompleted.includes("shortage-list")) {
+        notes.push("Shortage list has not been pulled");
+      }
+      const pending = job.shortages.filter((item) => !item.complete);
+      const undated = pending.filter((item) => !item.dueDate);
+      if (undated.length) {
+        notes.push(`Missing shortage dates: ${undated.map((item) => item.pnNumber || item.kspNumber || "Unnamed item").join(", ")}`);
+      }
+      const longestDate = latestDate(pending.map((item) => item.dueDate));
+      if (longestDate) {
+        const items = pending
+          .filter((item) => item.dueDate === longestDate)
+          .map((item) => item.pnNumber || item.kspNumber || "Unnamed item");
+        notes.push(`Longest shortage lead: ${items.join(", ")} due ${shortageReportDate(longestDate)}`);
+      }
+      if (jobBuildLevel(job) === "PCBA") {
+        if (!job.pcbDockDate) notes.push("PCB Dock Date is not set");
+        else if (!job.workflowCompleted.includes("fabrication-dock")) {
+          notes.push("PCB Dock Date has not been confirmed");
+        }
+      }
+      return notes.join("\n");
+    };
+    const groups = new Map<string, { label: string; jobs: Job[] }>();
+    jobs.filter((job) => job.status !== "Complete").forEach((job) => {
+      const folder = customerOrganizationFolders.find(
+        (item) =>
+          item.division === job.division &&
+          item.customers.some(
+            (customer) => customer.trim().toLowerCase() === job.customer.trim().toLowerCase(),
+          ),
+      );
+      const key = folder ? `folder:${folder.id}` : `customer:${job.division}:${job.customer.trim().toLowerCase()}`;
+      const group = groups.get(key) ?? { label: folder?.name ?? job.customer, jobs: [] };
+      group.jobs.push(job);
+      groups.set(key, group);
+    });
+    [...groups.values()]
+      .sort((a, b) => a.label.localeCompare(b.label))
+      .forEach((group) => {
+        const rows = group.jobs
+          .sort((a, b) => a.jobNumber.localeCompare(b.jobNumber, undefined, { numeric: true }))
+          .map((job) => ({
+            "Customer Name": job.customer,
+            "Job#": job.jobNumber,
+            KSID: job.ksid,
+            "PN Name": job.pnName,
+            "PN and Rev": [job.pn, job.rev ? `Rev ${job.rev}` : ""].filter(Boolean).join(" "),
+            "Project Created": excelDate(job.createdDate),
+            "PO#": job.poNumber,
+            "Quote#": job.quoteNumber,
+            "Current Status of Job": job.status,
+            "Latest Note": latestNote(job)?.text ?? "",
+            "Krypton Dock Date": excelDate(jobKryptonDockDate(job)),
+            "Special Notes": specialNotes(job),
+          }));
+        const sheet = XLSX.utils.json_to_sheet(rows, {
+          header: [
+            "Customer Name", "Job#", "KSID", "PN Name", "PN and Rev",
+            "Project Created", "PO#", "Quote#", "Current Status of Job",
+            "Latest Note", "Krypton Dock Date", "Special Notes",
+          ],
+          cellDates: true,
+        });
+        sheet["!cols"] = [
+          { wch: 24 }, { wch: 14 }, { wch: 16 }, { wch: 28 }, { wch: 26 },
+          { wch: 16 }, { wch: 18 }, { wch: 18 }, { wch: 24 }, { wch: 48 },
+          { wch: 18 }, { wch: 58 },
+        ];
+        sheet["!autofilter"] = { ref: sheet["!ref"]! };
+        XLSX.utils.book_append_sheet(workbook, sheet, safeSheetName(group.label));
+      });
+
+    const completedJobs = jobs
+      .filter((job) => job.status === "Complete")
+      .sort((a, b) => a.customer.localeCompare(b.customer) || a.jobNumber.localeCompare(b.jobNumber, undefined, { numeric: true }));
+    const completedRows = completedJobs.map((job) => {
+      const note = latestNote(job);
+      const dockDate = jobKryptonDockDate(job);
+      const completionDate = job.completedDate || note?.date || chicagoDateKey();
+      const deliveryResult = !dockDate
+        ? "Not Set"
+        : completionDate < dockDate
+          ? "Early"
+          : completionDate === dockDate
+            ? "On Time"
+            : "Past Due";
+      return [
+        job.customer,
+        job.jobNumber,
+        job.ksid,
+        job.pnName,
+        [job.pn, job.rev ? `Rev ${job.rev}` : ""].filter(Boolean).join(" "),
+        excelDate(job.createdDate),
+        excelDate(dockDate),
+        deliveryResult,
+        "",
+        excelDate(completionDate),
+      ];
+    });
+    const completedSheet = XLSX.utils.aoa_to_sheet([
+      [
+        "Customer Name", "Job #", "KSID", "PN Name", "PN and Rev",
+        "Project Created", "Krypton Due Date", "Delivered On Time?",
+        "Validation Override (Past Due Only)", "Completion Date (calculation)",
+        "", "Delivery Result", "Count",
+      ],
+      ...completedRows,
+    ], { cellDates: true });
+    const completedLastRow = Math.max(2, completedRows.length + 1);
+    for (let row = 2; row <= completedRows.length + 1; row += 1) {
+      completedSheet[`H${row}`] = {
+        t: "s",
+        v: completedRows[row - 2][7],
+        f: `IF(G${row}="","Not Set",IF(I${row}="Job was completed on time","On Time",IF(J${row}<G${row},"Early",IF(J${row}=G${row},"On Time","Past Due"))))`,
+      } as any;
+    }
+    completedSheet.L1 = { t: "s", v: "Delivery Result" };
+    completedSheet.M1 = { t: "s", v: "Count" };
+    ["Early", "On Time", "Past Due"].forEach((label, index) => {
+      const row = index + 2;
+      completedSheet[`L${row}`] = { t: "s", v: label };
+      completedSheet[`M${row}`] = {
+        t: "n",
+        v: completedRows.filter((item) => item[7] === label).length,
+        f: `COUNTIF(H2:H${completedLastRow},"${label}")`,
+      } as any;
+    });
+    completedSheet["!ref"] = `A1:M${Math.max(completedRows.length + 1, 4)}`;
+    completedSheet["!cols"] = [
+      { wch: 24 }, { wch: 14 }, { wch: 16 }, { wch: 28 }, { wch: 26 },
+      { wch: 16 }, { wch: 18 }, { wch: 19 }, { wch: 36 }, { wch: 14, hidden: true },
+      { wch: 3 }, { wch: 18 }, { wch: 10 },
+    ];
+    completedSheet["!autofilter"] = { ref: `A1:I${completedLastRow}` };
+    XLSX.utils.book_append_sheet(workbook, completedSheet, safeSheetName("Completed Jobs"));
+    (workbook as any).Workbook = {
+      ...((workbook as any).Workbook ?? {}),
+      CalcPr: { calcMode: "auto", fullCalcOnLoad: "1", forceFullCalc: "1" },
+    };
+
+    try {
+      downloadWrappedWorkbook(
+        workbook,
+        `Krypton-Solutions-OOR-Jobs-${chicagoDateKey()}.xlsx`,
+        { completedJobsChart: true },
+      );
+      notify("Excel workbook downloaded.");
+    } catch {
+      notify("The Excel workbook could not be downloaded. Please try again.");
+    }
   }
 
   function exportCompleteBackup() {
+    flushDeferredEdits();
     const workbook = XLSX.utils.book_new();
     const backupRows = [
       {
@@ -2624,11 +2841,15 @@ export default function Home() {
     ]);
     summarySheet["!cols"] = [{ wch: 28 }, { wch: 100 }];
     XLSX.utils.book_append_sheet(workbook, summarySheet, "Read Me");
-    XLSX.writeFile(
-      workbook,
-      `Krypton-Solutions-OOR-Complete-Backup-${chicagoDateKey()}.xlsx`,
-    );
-    notify("Complete Excel backup downloaded.");
+    try {
+      downloadWrappedWorkbook(
+        workbook,
+        `Krypton-Solutions-OOR-Complete-Backup-${chicagoDateKey()}.xlsx`,
+      );
+      notify("Complete Excel backup downloaded.");
+    } catch {
+      notify("The complete backup could not be downloaded. Please try again.");
+    }
   }
 
   async function importCompleteBackup(event: ChangeEvent<HTMLInputElement>) {
@@ -2985,7 +3206,7 @@ export default function Home() {
           <div>
             <p className="eyebrow">Krypton Solutions OOR</p>
             <h1>{title}</h1>
-            <p className="date-line">Version 75 · {dateLabel(chicagoDateKey())}</p>
+            <p className="date-line">Version 76 · {dateLabel(chicagoDateKey())}</p>
           </div>
           <div className="topbar-actions">
             {(activeView === "commercial" || activeView === "aerospace") && (
@@ -3014,7 +3235,7 @@ export default function Home() {
             metrics={metrics}
             onOpen={openJobTab}
             onView={setActiveView}
-            onShortageReport={() => downloadShortageListReport(jobs)}
+            onWeeklyReport={() => downloadWeeklyReport(jobs)}
           />
         )}
         {(activeView === "commercial" || activeView === "aerospace") && (
@@ -3132,7 +3353,7 @@ function shortageReportDate(value: string) {
   return match ? `${match[2]}/${match[3]}/${match[1]}` : "Not Set";
 }
 
-function downloadShortageListReport(jobs: Job[]) {
+function downloadWeeklyReport(jobs: Job[]) {
   const today = chicagoDateKey();
   const date = new Date(`${today}T12:00:00Z`);
   const day = date.getUTCDay();
@@ -3233,7 +3454,59 @@ function downloadShortageListReport(jobs: Job[]) {
   needsSheet["!autofilter"] = { ref: needsSheet["!ref"]! };
   needsSheet["!rows"] = needsRows.map(() => ({ hpt: 32 }));
   XLSX.utils.book_append_sheet(workbook, needsSheet, "Need Shortage Report");
-  downloadWrappedWorkbook(workbook, `Krypton-OOR-Shortage-List-Report-${today}.xlsx`);
+
+  const onScheduleColumns = [
+    "Customer Name",
+    "Job #",
+    "KSID",
+    "PN Name",
+    "PN and Rev",
+    "Project Creation Date",
+    "Has Shortage Been Pulled",
+    "PCB Dock Date Confirmed",
+    "Krypton Dock Date",
+  ];
+  const onScheduleJobs = openJobs
+    .filter((job) => {
+      const dockDate = jobKryptonDockDate(job);
+      return !dockDate || dockDate >= today;
+    })
+    .sort((a, b) =>
+      (jobKryptonDockDate(a) || "9999-12-31").localeCompare(
+        jobKryptonDockDate(b) || "9999-12-31",
+      ) || a.customer.localeCompare(b.customer) ||
+      a.jobNumber.localeCompare(b.jobNumber, undefined, { numeric: true }),
+    );
+  const onScheduleRows = [
+    onScheduleColumns,
+    ...onScheduleJobs.map((job) => [
+      job.customer,
+      job.jobNumber,
+      job.ksid,
+      job.pnName,
+      [job.pn, job.rev ? `Rev ${job.rev}` : ""].filter(Boolean).join(" "),
+      shortageReportDate(job.createdDate),
+      job.noShortageList
+        ? "Waived"
+        : job.shortages.length > 0 || job.workflowCompleted.includes("shortage-list")
+          ? "Yes"
+          : "No",
+      jobBuildLevel(job) === "PCBA"
+        ? job.workflowCompleted.includes("fabrication-dock")
+          ? "Yes"
+          : "No"
+        : "Not Applicable",
+      shortageReportDate(jobKryptonDockDate(job)),
+    ]),
+  ];
+  const onScheduleSheet = XLSX.utils.aoa_to_sheet(onScheduleRows);
+  onScheduleSheet["!cols"] = [
+    { wch: 26 }, { wch: 17 }, { wch: 17 }, { wch: 30 }, { wch: 30 },
+    { wch: 22 }, { wch: 28 }, { wch: 28 }, { wch: 22 },
+  ];
+  onScheduleSheet["!autofilter"] = { ref: onScheduleSheet["!ref"]! };
+  XLSX.utils.book_append_sheet(workbook, onScheduleSheet, "On Schedule Builds");
+  downloadWrappedWorkbook(workbook, `Krypton-OOR-Weekly-Report-${today}.xlsx`);
 }
 
 function Overview({
@@ -3241,7 +3514,7 @@ function Overview({
   metrics,
   onOpen,
   onView,
-  onShortageReport,
+  onWeeklyReport,
 }: {
   jobs: Job[];
   metrics: {
@@ -3252,7 +3525,7 @@ function Overview({
   };
   onOpen: (id: string) => void;
   onView: (view: View) => void;
-  onShortageReport: () => void;
+  onWeeklyReport: () => void;
 }) {
   const cards = [
     {
@@ -3296,8 +3569,8 @@ function Overview({
         })}
       </div>
       <div className="panel" style={{ padding: 16 }}>
-        <button className="button primary" type="button" onClick={onShortageReport}>
-          <Download size={17} /> Shortage List Report
+        <button className="button primary" type="button" onClick={onWeeklyReport}>
+          <Download size={17} /> Weekly Report
         </button>
       </div>
       <div className="manufacturing-overview">
